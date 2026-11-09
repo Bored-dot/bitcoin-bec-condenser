@@ -12,6 +12,7 @@ The Condensate: A static 64-byte BIP-340 Schnorr signature settles the entire bl
 Economical Scale: Compresses 5000 global structural validations into a single L1 Taproot expenditure path.
 Sub-Second Efficiency: Executes full geometric point summation over 5000 active keys in just 125.64 ms natively on the "secp256k1" curve.
 Decentralization Preservation: Maximizes off-chain scalability while keeping the L1 blockchain light enough to run on standard home hardware.
+![Linux Benchmark](linux_benchmark.png)
 
 ## Quick Start & Native Compilation
 A C++17 compliant compiler (g++)
