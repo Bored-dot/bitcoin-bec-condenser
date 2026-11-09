@@ -13,6 +13,7 @@ Economical Scale: Compresses 5000 global structural validations into a single L1
 Sub-Second Efficiency: Executes full geometric point summation over 5000 active keys in just 125.64 ms natively on the "secp256k1" curve.
 Decentralization Preservation: Maximizes off-chain scalability while keeping the L1 blockchain light enough to run on standard home hardware.
 ![Linux Benchmark](linux_benchmark.png)
+![Linux Verification Success](linux_verification_success.png)
 
 ## Quick Start & Native Compilation
 A C++17 compliant compiler (g++)
