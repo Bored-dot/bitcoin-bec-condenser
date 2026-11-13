@@ -1,0 +1,18 @@
+# binariji
+bec
+*.o
+
+# lokalno stanje testa
+.regtest-data/
+.testrun/
+
+# TAJNI KLJUČEVI — nikad ne commitaj
+keys.txt
+operators.txt
+keys*.txt
+operators*.txt
+
+# izlaz
+*.hex
+commitment.txt
+cm*.txt
