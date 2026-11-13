@@ -1,0 +1,66 @@
+
+═══ 0. Bitcoin Core regtest
+  verzija: Bitcoin Core version v27.1.0
+  blokova: 150
+  ✅ PASS  regtest node radi
+
+═══ 1. Krug — 12 korisnika, fanout 4
+  operator financiran: d012672856e99e2731c45634ef1fd52ea94317a04d911c87c6c61b4ff2338db7 vout=1 (100000 sats)
+    Korisnika                            : 12
+    Grupa (fanout 4)                      : 3
+    Ukupno korisničkih balansa           : 12000 sats
+    CSV delay za unilateralni exit       : 144 blokova
+    On-chain tx-ova                      : 4  (1 funding + 3 grupnih)
+  ✅ PASS  krug zapisan (round.txt + tx datoteke)
+  ✅ PASS  4 tx-a: 1 funding + 3 grupne
+
+═══ 2. Broadcast — funding pa grupne tx
+  ✅ PASS  funding tx — node prihvaća
+  ✅ PASS  funding tx u mempoolu (2cf3199b37a1afb7f8913e83064a8742d8b7205cffc54df7453634874623e5cb)
+  ✅ PASS  grupna tx 1 (MuSig2: operator + 4 korisnika) — node prihvaća
+  ✅ PASS  grupna tx 2 (MuSig2: operator + 4 korisnika) — node prihvaća
+  ✅ PASS  grupna tx 3 (MuSig2: operator + 4 korisnika) — node prihvaća
+  visina: 153
+
+═══ 3. Svaki VTXO postoji na lancu s TOČNIM balansom
+  ✅ PASS  12 VTXO outputa na lancu
+  ✅ PASS  svaki VTXO ima točno 1000 sats (nema zajedničkog UTXO-a)
+  0 3bec4255ec4e4cc2abcc6140c856975dc47e0344d1850aab2a5e60a93b445700 0 1000
+  1 3bec4255ec4e4cc2abcc6140c856975dc47e0344d1850aab2a5e60a93b445700 1 1000
+  2 3bec4255ec4e4cc2abcc6140c856975dc47e0344d1850aab2a5e60a93b445700 2 1000
+  3 3bec4255ec4e4cc2abcc6140c856975dc47e0344d1850aab2a5e60a93b445700 3 1000
+
+═══ 4. NEGATIVNI — exit prije CSV-a
+  ✅ PASS  korisnik prije 144 bloka — node odbija: non-BIP68-final
+
+═══ 5. Korisnik izlazi sam, nakon CSV-a
+  visina: 303
+    VTXO iznos            : 1000 sats  (točno njegov balans)
+    Potpisnik             : korisnik 5  (vlasnik)
+    nSequence             : 144  (CSV traži >= 144)
+    Izlaz                 : 700 sats
+  ✅ PASS  korisnik 5: vlastiti ključ, CSV istekao — node prihvaća
+  ✅ PASS  exit potvrđen u bloku — korisnik dobio točno svoj balans
+
+═══ 6. NEGATIVNI — exit tuđim ključem
+  ✅ PASS  korisnik 7 potpisuje VTXO korisnika 6 — node odbija: mandatory-script-verify-flag-failed (Invalid Schnorr signature)
+  ✅ PASS  kontrola: vlasnik korisnika 6 prolazi — node prihvaća
+
+═══ 7. NEGATIVNI — prijevara: jedan dobiva više, drugi manje
+    Napadač (korisnik 0) traži  : 7000 sats  (umjesto 5000)
+    Žrtva   (korisnik 3) gubi   : 2000 sats
+    Zbroj outputa         : 20000 sats  (nepromijenjen)
+    Potpis                : pošteni 64 B, jer potpis za ovu tx NE POSTOJI
+  ✅ PASS  prijevara u grupnoj tx (potpis vezan na drugu tx) — node odbija: mandatory-script-verify-flag-failed (Invalid Schnorr signature)
+  ✅ PASS  kontrola: poštena grupna tx prolazi — node prihvaća
+
+═══ 8. Skala
+    Grupa                                : 79
+    On-chain tx-ova                      : 80
+    Najveća grupa                        : 64 korisnika (65 potpisnika)
+    Najveći MuSig2 skup                  : 65 potpisnika
+  ✅ PASS  5000 korisnika bez ijednog MuSig2 skupa veličine 5000
+
+═══ SAŽETAK
+  PASS: 18   FAIL: 0
+  🎉 SVI TESTOVI PROŠLI — VTXO settlement potvrđen na Bitcoin Core konsenzusu.
