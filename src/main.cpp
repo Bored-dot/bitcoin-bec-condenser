@@ -9,7 +9,8 @@
 //   5. (spend-keypath)    MuSig2 potpis preko BIP-341 sighasha -> key-path spend
 //   6. (spend-scriptpath) korisnikov unilateralni exit preko skripte + CSV delay
 //   7. (spend-op-exit)    operatorska putanja preko skriptnog lista (CSV stroži)
-//   8. (proof)            inclusion proof korisnika u state root
+//   8. (spend-challenge)  osporavatelj oduzima izlaz uz javni dokaz prijevare
+//   9. (proof)            inclusion proof korisnika u state root
 //
 // Build: vidi test/build.sh
 
@@ -17,6 +18,7 @@
 #include "taproot.hpp"
 #include "musig.hpp"
 #include "protect.hpp"
+#include "challenge.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -92,10 +94,27 @@ static int cmd_commit(int argc, char** argv) {
     const bool protect          = arg_present(argc, argv, "--protect");
     const uint32_t op_delay     = (uint32_t)std::stoul(arg_value(argc, argv, "--op-delay",
                                        std::to_string(delay * 2)));
+    // --challenge: svaki korisnik dobiva DVA lista — claim (nakon prozora) i
+    // challenge (osporavatelj s dokazom). Vidi src/challenge.hpp.
+    const bool challenge_mode  = arg_present(argc, argv, "--challenge");
+    const uint32_t chal_window = (uint32_t)std::stoul(arg_value(argc, argv, "--challenge-window", "144"));
+    unsigned char challenger_xonly[32] = {0};
+    bool have_challenger = false;
     const std::string leaf_mode = arg_value(argc, argv, "--leaf-mode", "exit"); // exit | pk
     size_t leaves               = (size_t)std::stoul(arg_value(argc, argv, "--leaves", "64"));
 
     MusigAggregator agg_ctx;
+
+    if (challenge_mode) {
+        unsigned char csk[32];
+        if (!from_hex32(arg_value(argc, argv, "--challenger-key"), csk))
+            die("--challenge traži --challenger-key <64 hex> (tajni ključ osporavatelja)");
+        Signer cs;
+        if (!MusigAggregator::make_signer(agg_ctx.ctx, csk, cs)) die("neispravan --challenger-key");
+        secure_zero(csk, 32);
+        secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, challenger_xonly, &cs.xonly);
+        have_challenger = true;
+    }
 
     // ---- korisnici ----
     std::vector<std::string> key_lines = read_lines(keys_path);
@@ -145,15 +164,29 @@ static int cmd_commit(int argc, char** argv) {
     if (protect && op_delay <= delay)
         die("--op-delay mora biti STROGO veći od --delay, inače operatori mogu pretrčati korisnike");
 
+    if (challenge_mode && !have_challenger) die("--challenge bez osporavatelja");
+    // U --challenge načinu svaki korisnik zauzima DVA lista (claim + challenge).
+    const size_t per_user = challenge_mode ? 2 : 1;
+
     std::vector<std::vector<unsigned char>> scripts;
     scripts.reserve(leaves);
-    // Ako je --protect, list 0 je operatorski; korisnici počinju od 1.
+    // Ako je --protect, list 0 je operatorski; korisnici počinju nakon njega.
     const size_t user_leaf_offset = protect ? 1 : 0;
-    const size_t n_user_leaves = leaves > user_leaf_offset ? leaves - user_leaf_offset : 0;
+    size_t n_user_leaves = leaves > user_leaf_offset ? leaves - user_leaf_offset : 0;
+    if (challenge_mode) n_user_leaves /= 2;   // svaki korisnik traži 2 lista
+    leaves = user_leaf_offset + per_user * n_user_leaves;   // stvarna veličina stabla
+
     for (size_t i = 0; i < n_user_leaves; i++) {
         unsigned char ux[32];
         secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, ux, &users[i].xonly);
-        if (leaf_mode == "pk") {
+        if (challenge_mode) {
+            // tvrdnja: koliko korisnik i misli da mu pripada
+            uint64_t bal = 100000000ULL + 1500ULL * (i % 977);
+            unsigned char digest[32];
+            claim_digest_of(state_root, i, bal, digest);
+            scripts.push_back(claim_leaf_script(digest, ux, chal_window));
+            scripts.push_back(challenge_leaf_script(digest, challenger_xonly, 1));
+        } else if (leaf_mode == "pk") {
             // list identičan descriptor fragmentu pk(KEY): <32B kljuc> OP_CHECKSIG
             std::vector<unsigned char> sc;
             push_data(sc, ux, 32);
@@ -263,6 +296,9 @@ static int cmd_commit(int argc, char** argv) {
     std::cout << "CSV delay korisnika (blokovi)       : " << delay << "\n";
     std::cout << "CSV delay operatora (blokovi)       : " << (protect ? std::to_string(op_delay) : "— (nema operatorskog lista)") << "\n";
     std::cout << "Key-path potrošnja                  : " << (protect ? "NEMOGUĆA (NUMS internal key)" : "moguća (MuSig2 operatora)") << "\n";
+    if (challenge_mode)
+        std::cout << "Challenge/response                  : AKTIVAN (prozor " << chal_window
+                  << " blokova, challenge CSV 1)\n";
     std::cout << "Operatorskih ključeva (MuSig2)      : " << operators.size() << "\n";
     std::cout << "-------------------------------------------------------------------\n";
     std::cout << "State root                          : " << to_hex(state_root, 32) << "\n";
@@ -299,7 +335,10 @@ static int cmd_commit(int argc, char** argv) {
         << "leaf_mode=" << leaf_mode << "\n"
         << "protect=" << (protect ? 1 : 0) << "\n"
         << "op_delay=" << op_delay << "\n"
-        << "op_agg=" << (protect ? to_hex(op_agg_ser, 32) : std::string("")) << "\n";
+        << "op_agg=" << (protect ? to_hex(op_agg_ser, 32) : std::string("")) << "\n"
+        << "challenge=" << (challenge_mode ? 1 : 0) << "\n"
+        << "challenge_window=" << chal_window << "\n"
+        << "challenger=" << (challenge_mode ? to_hex(challenger_xonly, 32) : std::string("")) << "\n";
     out.close();
     std::cout << "\n[commit] spremljeno u " << out_path << "\n";
     return 0;
@@ -489,7 +528,15 @@ static int cmd_spend_scriptpath(int argc, char** argv) {
         if (MusigAggregator::make_signer(agg_ctx.ctx, sk, sg)) users.push_back(sg);
         secure_zero(sk, 32);
     }
-    const size_t n_user_leaves = leaves > user_offset ? leaves - user_offset : 0;
+    std::map<std::string, std::string>::const_iterator it_ch = s.cm.find("challenge");
+    const bool chal = (it_ch != s.cm.end() && it_ch->second == "1");
+    const uint32_t chal_window = chal ? (uint32_t)std::stoul(kv_get(s.cm, "challenge_window")) : 0;
+    unsigned char challenger_x[32] = {0};
+    if (chal && !from_hex32(kv_get(s.cm, "challenger"), challenger_x)) die("challenger nije 32 B");
+    const size_t per_user = chal ? 2 : 1;
+
+    size_t n_user_leaves = leaves > user_offset ? leaves - user_offset : 0;
+    if (chal) n_user_leaves /= 2;
     if (leaf >= n_user_leaves || leaf >= users.size()) die("--leaf izvan granica");
 
     std::vector<std::vector<unsigned char>> scripts;
@@ -501,7 +548,15 @@ static int cmd_spend_scriptpath(int argc, char** argv) {
     for (size_t i = 0; i < n_user_leaves; i++) {
         unsigned char ux[32];
         secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, ux, &users[i].xonly);
-        scripts.push_back(exit_leaf_script(state_root, ux, delay));
+        if (chal) {
+            uint64_t bal = 100000000ULL + 1500ULL * (i % 977);
+            unsigned char digest[32];
+            claim_digest_of(state_root, i, bal, digest);
+            scripts.push_back(claim_leaf_script(digest, ux, chal_window));
+            scripts.push_back(challenge_leaf_script(digest, challenger_x, 1));
+        } else {
+            scripts.push_back(exit_leaf_script(state_root, ux, delay));
+        }
     }
     TapScriptTree tree;
     tree.build(scripts);
@@ -512,7 +567,7 @@ static int cmd_spend_scriptpath(int argc, char** argv) {
     if (std::memcmp(root_check, claimed, 32) != 0)
         die("rekonstruirano skriptno stablo ne odgovara commitmentu");
 
-    const size_t script_index = leaf + user_offset;
+    const size_t script_index = user_offset + per_user * leaf;
     unsigned char leaf_hash[32];
     tapleaf_hash(scripts[script_index], leaf_hash);
 
@@ -697,6 +752,138 @@ static int cmd_spend_op_exit(int argc, char** argv) {
     return 0;
 }
 
+// ================================================================ spend-challenge
+// Osporavatelj preuzima izlaz otkrivanjem dokaza (preimage) koji hashira na
+// claim_digest iz skripta. Bez točnog dokaza skript pada na OP_EQUALVERIFY.
+static int cmd_spend_challenge(int argc, char** argv) {
+    SpendCtx s = prepare_spend(argc, argv);
+    const std::string out_path = arg_value(argc, argv, "--out", "challenge.hex");
+    const size_t leaf = (size_t)std::stoul(arg_value(argc, argv, "--leaf", "0"));
+    MusigAggregator agg_ctx;
+
+    std::map<std::string, std::string>::const_iterator it_ch = s.cm.find("challenge");
+    if (it_ch == s.cm.end() || it_ch->second != "1")
+        die("commitment nije u --challenge načinu");
+
+    unsigned char state_root[32];
+    if (!from_hex32(kv_get(s.cm, "state_root"), state_root)) die("state_root nije 32 B");
+    const uint32_t delay = (uint32_t)std::stoul(kv_get(s.cm, "delay"));
+    const size_t leaves = (size_t)std::stoul(kv_get(s.cm, "leaves"));
+    const uint32_t chal_window = (uint32_t)std::stoul(kv_get(s.cm, "challenge_window"));
+    unsigned char challenger_x[32];
+    if (!from_hex32(kv_get(s.cm, "challenger"), challenger_x)) die("challenger nije 32 B");
+
+    std::map<std::string, std::string>::const_iterator it_p = s.cm.find("protect");
+    const bool protect = (it_p != s.cm.end() && it_p->second == "1");
+    const size_t user_offset = protect ? 1 : 0;
+
+    std::vector<std::string> user_lines = read_lines(kv_get(s.cm, "keys_file"));
+    std::vector<Signer> users;
+    for (const std::string& line : user_lines) {
+        unsigned char sk[32];
+        if (!from_hex32(line, sk)) continue;
+        Signer sg;
+        if (MusigAggregator::make_signer(agg_ctx.ctx, sk, sg)) users.push_back(sg);
+        secure_zero(sk, 32);
+    }
+    size_t n_user_leaves = leaves > user_offset ? leaves - user_offset : 0;
+    n_user_leaves /= 2;
+    if (leaf >= n_user_leaves || leaf >= users.size()) die("--leaf izvan granica");
+
+    std::vector<std::vector<unsigned char>> scripts;
+    if (protect) {
+        unsigned char op_agg[32];
+        if (!from_hex32(kv_get(s.cm, "op_agg"), op_agg)) die("op_agg nije 32 B");
+        scripts.push_back(csv_checksig_script(op_agg, (uint32_t)std::stoul(kv_get(s.cm, "op_delay"))));
+    }
+    std::vector<unsigned char> claim_digest;
+    for (size_t i = 0; i < n_user_leaves; i++) {
+        unsigned char ux[32];
+        secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, ux, &users[i].xonly);
+        uint64_t bal = 100000000ULL + 1500ULL * (i % 977);
+        unsigned char digest[32];
+        claim_digest_of(state_root, i, bal, digest);
+        if (i == leaf) claim_digest.assign(digest, digest + 32);
+        scripts.push_back(claim_leaf_script(digest, ux, chal_window));
+        scripts.push_back(challenge_leaf_script(digest, challenger_x, 1));
+    }
+
+    TapScriptTree tree;
+    tree.build(scripts);
+    unsigned char root_check[32];
+    tree.merkle_root(root_check);
+    unsigned char claimed_root[32];
+    if (!from_hex32(kv_get(s.cm, "script_root"), claimed_root)) die("script_root nije 32 B");
+    if (std::memcmp(root_check, claimed_root, 32) != 0)
+        die("rekonstruirano skriptno stablo ne odgovara commitmentu");
+
+    // Dokaz je 48-bajtni preimage tvrdnje; SHA256(dokaz) mora dati claim_digest.
+    std::vector<unsigned char> evidence(48, 0);
+    {
+        std::memcpy(evidence.data(), state_root, 32);
+        for (int b = 0; b < 8; b++) evidence[32 + b] = (unsigned char)((uint64_t)leaf >> (8 * b));
+        uint64_t bal = 100000000ULL + 1500ULL * (leaf % 977);
+        for (int b = 0; b < 8; b++) evidence[40 + b] = (unsigned char)(bal >> (8 * b));
+        if (arg_present(argc, argv, "--bad-evidence")) {
+            evidence[0] ^= 0xFF;   // namjerno pokvaren dokaz
+        }
+    }
+    unsigned char ev_digest[32];
+    sha256(evidence.data(), evidence.size(), ev_digest);
+
+    // challenge list je neparan (1) unutar para
+    const size_t script_index = user_offset + 2 * leaf + 1;
+    unsigned char leaf_hash[32];
+    tapleaf_hash(scripts[script_index], leaf_hash);
+
+    unsigned char sighash[32];
+    sighash_taproot(s.tx, s.spent, 0, 0x00, 1, leaf_hash, sighash);
+
+    unsigned char csk[32];
+    if (!from_hex32(arg_value(argc, argv, "--challenger-key"), csk))
+        die("--challenger-key je obavezan");
+    Signer challenger;
+    if (!MusigAggregator::make_signer(agg_ctx.ctx, csk, challenger)) die("neispravan --challenger-key");
+    secure_zero(csk, 32);
+
+    unsigned char sig[64];
+    if (!schnorr_sign(agg_ctx.ctx, challenger, sighash, sig)) die("potpisivanje nije uspjelo");
+
+    std::vector<unsigned char> path = tree.merkle_path(script_index);
+    TaprootCommitment c;
+    std::memcpy(c.internal, s.commitment.internal, 32);
+    std::vector<unsigned char> cb = control_block(c, s.commitment.output_parity, path);
+
+    s.tx.vin[0].witness.clear();
+    s.tx.vin[0].witness.push_back(std::vector<unsigned char>(sig, sig + 64));
+    s.tx.vin[0].witness.push_back(evidence);
+    s.tx.vin[0].witness.push_back(scripts[script_index]);
+    s.tx.vin[0].witness.push_back(cb);
+
+    std::cout << "============ CHALLENGE SPEND (osporavanje izlaza) ============\n";
+    std::cout << "Korisnik (leaf index)        : " << leaf << "\n";
+    std::cout << "nSequence                    : " << s.tx.vin[0].sequence
+              << "  (challenge CSV traži >= 1)\n";
+    std::cout << "Claim digest (iz skripta)    : " << to_hex(claim_digest.data(), 32) << "\n";
+    std::cout << "Dokaz (preimage, 48 B)       : " << to_hex(evidence) << "\n";
+    std::cout << "SHA256(dokaz)                : " << to_hex(ev_digest, 32) << "\n";
+    std::cout << "Dokaz odgovara digestu?      : "
+              << (std::memcmp(ev_digest, claim_digest.data(), 32) == 0 ? "DA" : "NE — namjerno pokvaren")
+              << "\n";
+    std::cout << "Script                       : " << to_hex(scripts[script_index]) << "\n";
+    std::cout << "Dubina dokaza                : " << path.size() / 32 << " (" << cb.size() << " B)\n";
+
+    std::vector<unsigned char> raw = s.tx.serialize(true);
+    std::ofstream out(out_path);
+    if (!out.good()) die("ne mogu pisati " + out_path);
+    out << to_hex(raw) << "\n";
+    out.close();
+    std::cout << "Raw transakcija              : " << out_path << " (" << raw.size() << " B)\n";
+    std::cout << "txid                         : " << s.tx.txid() << "\n";
+    std::cout << "==============================================================\n";
+    return 0;
+}
+
 // ================================================================ proof
 static int cmd_proof(int argc, char** argv) {
     const std::string keys_path = arg_value(argc, argv, "--keys", "keys.txt");
@@ -776,12 +963,16 @@ int main(int argc, char** argv) {
                   << "  commit       --keys keys.txt --operators operators.txt --delay 10 --leaves 64\n"
                   << "               --hrp bcrt --out commitment.txt\n"
                   << "               [--protect] [--op-delay 288]   (NUMS internal key + operatorski CSV)\n"
+                  << "               [--challenge --challenge-window 96 --challenger-key <hex>]\n"
                   << "  spend-keypath --commitment commitment.txt --txid <hex> --vout 0 --amount <sats>\n"
                   << "               --dest-script <hex> --fee <sats> --out keypath.hex\n"
                   << "  spend-scriptpath --commitment commitment.txt --txid <hex> --vout 0 --amount <sats>\n"
                   << "               --dest-script <hex> --fee <sats> --leaf K --sequence D --out scriptpath.hex\n"
                   << "  spend-op-exit --commitment commitment.txt --txid <hex> --vout 0 --amount <sats>\n"
                   << "               --dest-script <hex> --fee <sats> --sequence D --out opexit.hex\n"
+                  << "  spend-challenge --commitment commitment.txt --txid <hex> --vout 0 --amount <sats>\n"
+                  << "               --dest-script <hex> --fee <sats> --leaf K --challenger-key <hex>\n"
+                  << "               [--bad-evidence] --out challenge.hex\n"
                   << "  proof        --keys keys.txt --commitment commitment.txt --index 7\n";
         return 0;
     }
@@ -792,6 +983,7 @@ int main(int argc, char** argv) {
         if (cmd == "spend-keypath")    return cmd_spend_keypath(argc, argv);
         if (cmd == "spend-scriptpath") return cmd_spend_scriptpath(argc, argv);
         if (cmd == "spend-op-exit")    return cmd_spend_op_exit(argc, argv);
+        if (cmd == "spend-challenge")  return cmd_spend_challenge(argc, argv);
         if (cmd == "proof")            return cmd_proof(argc, argv);
     } catch (const std::exception& e) {
         std::cerr << "[FATAL] " << e.what() << "\n";

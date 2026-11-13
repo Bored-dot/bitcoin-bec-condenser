@@ -6,7 +6,8 @@ Ovo nije samo benchmark agregacije ključeva. Ovo je program koji:
 - izgradi stvarni Taproot output koji komitira cijelo L2 stanje,
 - potpiše ga **pravim MuSig2 protokolom u dvije runde**,
 - i omogući korisniku **unilateralni exit koji stvarno drži** — jer je operatorima
-  key-path matematički onemogućen, a njihov CSV stroži od korisničkog.
+  key-path matematički onemogućen, a njihov CSV stroži od korisničkog,
+- a lažni izlaz se **oduzima javnim dokazom** unutar challenge prozora.
 
 Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu — ne ispisom u terminalu.
 
@@ -25,20 +26,25 @@ Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu �
  6. NEGATIVNI: pokvaren control blk ✅ odbijen — "Witness program hash mismatch"
  7. Inclusion proof                 ✅ valjan (dubina 6, 192 B)
  8. Skala: 5000 korisnika           ✅ 4096 exit listova, dubina 12
- 9. ZAŠTITA (NUMS + CSV)            ✅ 8 provjera — vidi dolje
+ 9. ZAŠTITA (NUMS + CSV)            ✅ 8 provjera — exita ne može pretrčati operator
     · key-path (MuSig2 operatora)  ✅ odbijen — Invalid Schnorr signature
     · korisnik prije 144 bloka     ✅ odbijen — non-BIP68-final
     · operator prije 288 blokova   ✅ odbijen — non-BIP68-final
     · korisnik nakon 144 bloka     ✅ prihvaćen + potvrđen u bloku
     · operator još na 144 bloka    ✅ odbijen (korisnički prozor traje)
     · operator nakon 288 blokova   ✅ prihvaćen + potvrđen u bloku
+10. CHALLENGE/RESPONSE              ✅ 6 provjera — lažni izlaz se oduzima
+    · tvrdnja prije prozora        ✅ odbijen — non-BIP68-final
+    · osporavanje, pogrešan dokaz  ✅ odbijen — OP_EQUALVERIFY failed
+    · osporavanje, ispravan dokaz  ✅ prihvaćen + potvrđen u bloku
+    · tvrdnja nakon prozora        ✅ prihvaćen + potvrđen u bloku
 ────────────────────────────────────────────────────────────────
-   PASS: 22   FAIL: 0
+   PASS: 28   FAIL: 0
 ════════════════════════════════════════════════════════════════
 ```
 
 Negativni testovi su namjerno tu: test koji uvijek prolazi ne dokazuje ništa.
-Testovi 4–6 i cijela sekcija 9 padaju s **točno onim konsenzus greškama koje Bitcoin Core stvarno vraća**.
+Testovi 4–6 te sekcije 9 i 10 padaju s **točno onim konsenzus greškama koje Bitcoin Core stvarno vraća**.
 
 ---
 
@@ -129,7 +135,23 @@ export LD_LIBRARY_PATH=../secp-inst/lib
              --txid <funding-txid> --vout <n> --amount <sats> \
              --dest-script <hex> --fee 2000 --sequence 288 --out opexit.hex
 
-# 5) dokaz da je korisnik u stanju
+# 5) challenge/response (lažni izlaz se oduzima)
+./bec commit --keys keys.txt --operators operators.txt \
+             --delay 144 --leaves 4096 --protect \
+             --challenge --challenge-window 96 \
+             --challenger-key <64 hex> --hrp bcrt --out committed.txt
+
+#    korisnik pokušava podići nakon prozora
+./bec spend-scriptpath --commitment committed.txt --txid <txid> --vout <n> \
+             --amount <sats> --dest-script <hex> --fee 2000 \
+             --leaf 2 --sequence 96 --out claim.hex
+
+#    bilo tko s dokazom oduzima izlaz (radi odmah, ne čeka prozor)
+./bec spend-challenge --commitment committed.txt --txid <txid> --vout <n> \
+             --amount <sats> --dest-script <hex> --fee 2000 --leaf 2 \
+             --challenger-key <hex> --sequence 1 --out challenge.hex
+
+# 6) dokaz da je korisnik u stanju
 ./bec proof --keys keys.txt --commitment commitment.txt --index 7
 ```
 
@@ -145,7 +167,7 @@ BITCOIN_BIN=/put/do/bitcoin-27.1/bin SECP_PREFIX=/put/do/secp-inst \
 ```
 
 Skripta diže vlastiti regtest node u `.regtest-data/`, rudari 150 blokova, i vozi svih
-22 testa od nule (~30 s, jer sekcija 9 rudari 144 + 288 blokova). Ne dira postojeći node.
+28 testa od nule (~45 s, jer sekcije 9 i 10 rudare 144 + 288 + 96 blokova). Ne dira postojeći node.
 
 ---
 
@@ -186,6 +208,50 @@ uzima sve", a ne per-korisničko poravnanje. Rješava se jedino kroz CTV / OP_CA
 
 ---
 
+## Challenge/response — zatvaranje pukotine
+
+`--protect` rješava *tko smije prvi*. Nije rješavao *koliko smije uzeti*: korisnik
+koji izađe podigne **cijeli UTXO**, ne samo svoj balans, i nitko ga ne može kazniti.
+Skripta to ne može provjeriti bez covenanta.
+
+Challenge/response to rješava **ekonomski**, na isti način na koji rade optimistic rollupi:
+
+```
+  1. CLAIM      korisnik potroši UTXO i veže se na claim_digest (iznos + index + state root)
+                → digest je UBAČEN U SKRIPT, pa se tvrdnja ne može promijeniti nakon uplate
+  2. WINDOW     96 blokova u kojima korisnik NE MOŽE podići sredstva (OP_CSV)
+  3. CHALLENGE  svako s valjanim dokazom preuzima izlaz:
+                  OP_SHA256 <claim_digest> OP_EQUALVERIFY ... <challenger> CHECKSIG
+                → dokaz mora hashirati na digest; bez toga skript pada
+  4. SETTLE     ako prozor prođe bez osporavanja, korisnik preuzima izlaz
+```
+
+Provjereno na nodeu:
+
+| scenarij | rezultat |
+|---|---|
+| tvrdnja prije 96. bloka | odbijen `non-BIP68-final` |
+| osporavanje s pogrešnim dokazom | odbijen `OP_EQUALVERIFY failed` |
+| osporavanje s ispravnim dokazom | **prihvaćen, izlaz oduzet, potvrđen** |
+| tvrdnja nakon prozora (neosporena) | **prihvaćen, potvrđen** |
+
+**Što je time stvarno zatvoreno:** lažna tvrdnja više nije besplatna. Vezana je na
+nepromjenjiv digest, mora preživjeti javni prozor, i svako može posegnuti za izlazom
+otkrivanjem dokaza — a otkrivanje dokaza je na lancu pa je svaki takav potez
+neporeciv i provjerljiv nakon činjenice.
+
+**Što ostaje pretpostavka (i piše u kodu, `src/challenge.hpp`):**
+- **Da je tvrdnja lažna provjerava se izvan lanca.** Na lancu se dokazuje samo da je
+  osporavatelj otkrio točno onaj dokaz na koji se korisnik vezao. BitVM2 bi i tu
+  provjeru doveo na lanac kroz bit-commitments.
+- **Netko mora gledati.** Ako nitko ne ospori u prozoru, lažna tvrdnja prolazi.
+  Ista pretpostavka kao kod svakog optimistic rollupa: dovoljan je jedan pošteni
+  promatrač.
+- **Utrka je moguća.** Challenge i claim su konkurentne transakcije na istom UTXO-u;
+  bez covenanta se to ne može ukloniti, samo učiniti skupim i javno dokazivim.
+
+---
+
 ## Što je u kodu
 
 | Datoteka | Sadržaj |
@@ -194,8 +260,9 @@ uzima sve", a ne per-korisničko poravnanje. Rješava se jedino kroz CTV / OP_CA
 | `src/taproot.hpp` | Merkle stablo + dokaz, tapscript gradnja, **BIP-341** skriptno stablo, taptweak, kontrolni blok, **sighash**, serijalizacija tx |
 | `src/musig.hpp` | **BIP-327** MuSig2: agregacija ključeva, dvije runde, agregacija potpisa, taptweak kroz keyagg cache |
 | `src/protect.hpp` | NUMS internal key + operatorski CSV list (zaštita exita) |
-| `src/main.cpp` | CLI: `genkeys`, `commit`, `spend-keypath`, `spend-scriptpath`, `spend-op-exit`, `proof` |
-| `test/run_regtest.sh` | End-to-end test na Bitcoin Core: 22 provjere, uključujući 3 negativna testa |
+| `src/challenge.hpp` | challenge/response: claim list, challenge list, claim_digest |
+| `src/main.cpp` | CLI: `genkeys`, `commit`, `spend-keypath`, `spend-scriptpath`, `spend-op-exit`, `spend-challenge`, `proof` |
+| `test/run_regtest.sh` | End-to-end test na Bitcoin Core: 28 provjera, uključujući 6 negativnih testova |
 
 Nema vanjskih ovisnosti osim `libsecp256k1`. Nema OpenSSL-a, nema boost-a, nema Bitcoin Core
 libraryja — namjerno, da se svaki korak može pročitati.
@@ -212,6 +279,7 @@ libraryja — namjerno, da se svaki korak može pročitati.
 | nema MuSig2 rundi | `nonce_gen` → `nonce_agg` → `nonce_process` → `partial_sign` → `partial_sig_agg` |
 | taptweak = sirovi Merkle root | `t = H("TapTweak", internal ‖ script_root)` |
 | operatori mogu potrošiti odmah i pretrčati exit | `--protect`: NUMS internal key + operatorski CSV 288 > korisnički 144 |
+| lažni izlaz nije kažnjiv | `--challenge`: digest u skriptu + prozor + oduzimanje uz dokaz |
 | "Covenant verified" = tautologija | stvarni CSV exit koji Bitcoin Core prihvaća |
 | `Main2.cpp` se ne kompajlira | jedan program, jedan `main.cpp` |
 | nema validacije ulaza | strogi hex, provjera svake povratne vrijednosti |
@@ -223,11 +291,12 @@ libraryja — namjerno, da se svaki korak može pročitati.
 
 Ovo je pošteni popis, ne marketinški.
 
-**0. Iznos izlaza se ne može ograničiti bez covenanta.**
-`--protect` rješava *tko smije prvi* (korisnik), ali ne *koliko smije uzeti*. Korisnik koji
-izlazi podiže cijeli UTXO. Bez CTV/OP_CAT/BitVM2 nema načina da se u skripti provjeri
-"ovaj izlaz nosi točno moj balans iz state roota". To je najveće preostalo ograničenje i
-ono koje razdvaja ovaj kod od upotrebljivog L2 rješenja.
+**0. Iznos izlaza se ne može provjeriti U SKRIPTI — brani se ekonomski, ne kriptografski.**
+`--challenge` čini lažnu tvrdnju kažnjivom (digest u skriptu + prozor + oduzimanje uz dokaz),
+pa se prijevara ne isplati. Ali skripta i dalje **ne zna** koliko korisniku pripada — to se
+provjerava izvan lanca. Za kriptografsku garanciju treba covenant (CTV / OP_CAT) ili BitVM2
+bit-commitments koji bi "claim ≤ balans" provjerili na lancu. To je najveće preostalo
+ograničenje i ono koje razdvaja ovaj kod od upotrebljivog L2 rješenja.
 
 **1. Verifikacija Merkle dokaza *unutar* skripte traži OP_CAT.**
 OP_CAT (BIP-347) nije aktiviran na Bitcoinu. Bez njega se u tapscriptu ne mogu spojiti dva
