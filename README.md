@@ -5,8 +5,8 @@ MuSig2 (BIP-327) + Taproot (BIP-341) settlement za L2 stanje, **testirano na Bit
 Ovo nije samo benchmark agregacije ključeva. Ovo je program koji:
 - izgradi stvarni Taproot output koji komitira cijelo L2 stanje,
 - potpiše ga **pravim MuSig2 protokolom u dvije runde**,
-- potroši ga na lancu **key-path** putanjom (64-bajtni witness, neovisno o broju korisnika),
-- i omogući svakom korisniku **unilateralni exit** bez ikakve suradnje operatora.
+- i omogući korisniku **unilateralni exit koji stvarno drži** — jer je operatorima
+  key-path matematički onemogućen, a njihov CSV stroži od korisničkog.
 
 Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu — ne ispisom u terminalu.
 
@@ -24,14 +24,21 @@ Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu �
  5. NEGATIVNI: exit prije CSV       ✅ odbijen — "Locktime requirement not satisfied"
  6. NEGATIVNI: pokvaren control blk ✅ odbijen — "Witness program hash mismatch"
  7. Inclusion proof                 ✅ valjan (dubina 6, 192 B)
- 8. Skala: 5000 korisnika           ✅ 82 ms, 4096 exit listova, dubina 12
+ 8. Skala: 5000 korisnika           ✅ 4096 exit listova, dubina 12
+ 9. ZAŠTITA (NUMS + CSV)            ✅ 8 provjera — vidi dolje
+    · key-path (MuSig2 operatora)  ✅ odbijen — Invalid Schnorr signature
+    · korisnik prije 144 bloka     ✅ odbijen — non-BIP68-final
+    · operator prije 288 blokova   ✅ odbijen — non-BIP68-final
+    · korisnik nakon 144 bloka     ✅ prihvaćen + potvrđen u bloku
+    · operator još na 144 bloka    ✅ odbijen (korisnički prozor traje)
+    · operator nakon 288 blokova   ✅ prihvaćen + potvrđen u bloku
 ────────────────────────────────────────────────────────────────
-   PASS: 13   FAIL: 0
+   PASS: 22   FAIL: 0
 ════════════════════════════════════════════════════════════════
 ```
 
 Negativni testovi su namjerno tu: test koji uvijek prolazi ne dokazuje ništa.
-Ta tri testa padaju s **točno onim konsenzus greškama koje Bitcoin Core stvarno vraća**.
+Testovi 4–6 i cijela sekcija 9 padaju s **točno onim konsenzus greškama koje Bitcoin Core stvarno vraća**.
 
 ---
 
@@ -43,10 +50,11 @@ Ta tri testa padaju s **točno onim konsenzus greškama koje Bitcoin Core stvarn
         ├── Merkle stablo stanja ──────────► state root  (13 razina, dokaz 416 B)
         │
         ├── tapscript stablo (4096 listova)
-        │      svaki list:  <state_root> DROP <delay> CSV DROP <user_key> CHECKSIG
+        │      list 0     :  <288> CSV DROP <op_agg> CHECKSIG        ← operatori
+        │      list 1..N  :  <state_root> DROP <144> CSV DROP <user> ← korisnici
         │      └─ state root je U SVAKOM LISTU → output key obavezno komitira stanje
         │
-        └── MuSig2 agregat operatorskih ključeva ──► internal key
+        └── internal key = BIP-341 NUMS točka (key-path NEMOGUĆ)
                                                           │
                               BIP-341 taptweak:  t = H("TapTweak", internal ‖ script_root)
                                                           │
@@ -55,14 +63,14 @@ Ta tri testa padaju s **točno onim konsenzus greškama koje Bitcoin Core stvarn
                                             bech32m adresa (bcrt1p…)
 
   TROŠENJE:
-    key-path    →  MuSig2 dvije runde → 64 B Schnorr potpis   [kooperativni settlement]
-    script-path →  user potpis + kontrolni blok + CSV delay    [unilateralni exit]
+    script-path (korisnik, CSV 144)  →  potpis + kontrolni blok   [unilateralni exit]
+    script-path (operatori, CSV 288) →  MuSig2 dvije runde         [kooperativni settlement]
+    key-path                        →  NEMOGUĆ (NUMS internal key)
 ```
 
 **Zašto ovo radi, a MuSig2-sam-za-5000-korisnika ne bi:** MuSig2 se koristi za **3 operatora**
 (mali, uvijek dostupan skup). 5000 korisnika je u **skriptnom stablu** i Merkle dokazu — svaki
 korisnik izlazi sam, bez rundi komunikacije i bez mogućnosti da ga bilo ko blokira.
-To je jedina podjela koja ima smisla na Bitcoinu danas.
 
 ---
 
@@ -101,20 +109,25 @@ export LD_LIBRARY_PATH=../secp-inst/lib
 ./bec genkeys --count 5000 --out keys.txt
 ./bec genkeys --count 3    --out operators.txt
 
-# 2) commitment: state root + tapscript stablo + MuSig2 internal key + adresa
+# 2) commitment — --protect je PREPORUČENI način:
+#    NUMS internal key + operatorski list s CSV-om 288
 ./bec commit --keys keys.txt --operators operators.txt \
-             --delay 144 --leaves 4096 --hrp bcrt --out commitment.txt
+             --delay 144 --op-delay 288 --protect \
+             --leaves 4096 --hrp bcrt --out commitment.txt
 
-# 3) kooperativni settlement (svi operatori, MuSig2, dvije runde)
-./bec spend-keypath --commitment commitment.txt \
-             --txid <funding-txid> --vout <n> --amount <sats> \
-             --dest-script <hex> --fee 2000 --out keypath.hex
+#    bez --protect: key-path ostaje moguć (99 vB kooperativno), ali operatori
+#    mogu pretrčati korisnički exit — koristi samo za mjerenje veličine
 
-# 4) unilateralni exit korisnika (bez operatora, nakon CSV delaya)
+# 3) unilateralni exit korisnika (bez operatora, nakon CSV 144)
 ./bec spend-scriptpath --commitment commitment.txt \
              --txid <funding-txid> --vout <n> --amount <sats> \
              --dest-script <hex> --fee 2000 \
              --leaf 2 --sequence 144 --out scriptpath.hex
+
+# 4) kooperativni settlement (MuSig2 preko skriptnog lista, tek nakon CSV 288)
+./bec spend-op-exit --commitment commitment.txt \
+             --txid <funding-txid> --vout <n> --amount <sats> \
+             --dest-script <hex> --fee 2000 --sequence 288 --out opexit.hex
 
 # 5) dokaz da je korisnik u stanju
 ./bec proof --keys keys.txt --commitment commitment.txt --index 7
@@ -132,7 +145,44 @@ BITCOIN_BIN=/put/do/bitcoin-27.1/bin SECP_PREFIX=/put/do/secp-inst \
 ```
 
 Skripta diže vlastiti regtest node u `.regtest-data/`, rudari 150 blokova, i vozi svih
-13 testova od nule. Traje ~15 sekundi i ne dira nikakav postojeći node.
+22 testa od nule (~30 s, jer sekcija 9 rudari 144 + 288 blokova). Ne dira postojeći node.
+
+---
+
+## Zaštita unilateralnog exita (NUMS + CSV)
+
+Bez ovoga exit ne vrijedi ništa: output je jedan UTXO s dvije putanje, a operatori su
+mogli potrošiti **key-path** odmah — pa su u utrci za isti UTXO trivijalno pobjeđivali
+korisnika koji čeka CSV. Exit je tada bio moguć samo ako su operatori pristojni, što je
+upravo ono što exit treba pokrivati.
+
+Rješenje (`--protect`):
+
+```
+   internal key  = 50929b74…803ac0   ← BIP-341 NUMS točka, diskretni log NEPOZNAT
+                                       ⇒ key-path je matematički nemoguć
+                                       ⇒ sve ide preko skriptnog stabla
+
+   tapscript stablo:
+     list 0        :  <288> CSV DROP <op_agg> CHECKSIG          ← operatori, CSV 288
+     list 1..N     :  <state_root> DROP <144> CSV DROP <user> CHECKSIG   ← korisnici, CSV 144
+```
+
+Korisnički CSV je **stroži** (manji) od operatorskog, pa korisnik uvijek ima prozor od
+144 bloka u kojem **samo on** može potrošiti output. Provjereno na nodeu:
+
+| visina | korisnik (CSV 144) | operator (CSV 288) |
+|---|---|---|
+| prije 144 | odbijen `non-BIP68-final` | odbijen `non-BIP68-final` |
+| nakon 144 | **prihvaćen, potvrđen** | odbijen — prozor još traje |
+| nakon 288 | prihvaćen | **prihvaćen, potvrđen** |
+
+Cijena: kooperativna potrošnja seli s key-path na script-path (~+60 vB). I dalje O(1),
+ali nije više 99 vB. To je namjerna zamjena — bez nje exit nije garancija.
+
+**Što ovime NIJE riješeno:** bez covenanta se iznos izlaza ne može ograničiti, pa korisnik
+koji izađe podiže **cijeli UTXO**, ne samo svoj balans. Zaštita je time "prvi koji izađe
+uzima sve", a ne per-korisničko poravnanje. Rješava se jedino kroz CTV / OP_CAT / BitVM2.
 
 ---
 
@@ -143,8 +193,9 @@ Skripta diže vlastiti regtest node u `.regtest-data/`, rudari 150 blokova, i vo
 | `src/crypto.hpp` | Pravi SHA-256, `tagged_hash` (BIP-340), hex, **bech32m** (BIP-350) |
 | `src/taproot.hpp` | Merkle stablo + dokaz, tapscript gradnja, **BIP-341** skriptno stablo, taptweak, kontrolni blok, **sighash**, serijalizacija tx |
 | `src/musig.hpp` | **BIP-327** MuSig2: agregacija ključeva, dvije runde, agregacija potpisa, taptweak kroz keyagg cache |
-| `src/main.cpp` | CLI: `genkeys`, `commit`, `spend-keypath`, `spend-scriptpath`, `proof` |
-| `test/run_regtest.sh` | End-to-end test na Bitcoin Core + tri negativna testa |
+| `src/protect.hpp` | NUMS internal key + operatorski CSV list (zaštita exita) |
+| `src/main.cpp` | CLI: `genkeys`, `commit`, `spend-keypath`, `spend-scriptpath`, `spend-op-exit`, `proof` |
+| `test/run_regtest.sh` | End-to-end test na Bitcoin Core: 22 provjere, uključujući 3 negativna testa |
 
 Nema vanjskih ovisnosti osim `libsecp256k1`. Nema OpenSSL-a, nema boost-a, nema Bitcoin Core
 libraryja — namjerno, da se svaki korak može pročitati.
@@ -160,6 +211,7 @@ libraryja — namjerno, da se svaki korak može pročitati.
 | potpis `batch[0]` ključem, verifikacija protiv `batch[0]` | MuSig2 dvije runde, verifikacija protiv **tweakane output točke** |
 | nema MuSig2 rundi | `nonce_gen` → `nonce_agg` → `nonce_process` → `partial_sign` → `partial_sig_agg` |
 | taptweak = sirovi Merkle root | `t = H("TapTweak", internal ‖ script_root)` |
+| operatori mogu potrošiti odmah i pretrčati exit | `--protect`: NUMS internal key + operatorski CSV 288 > korisnički 144 |
 | "Covenant verified" = tautologija | stvarni CSV exit koji Bitcoin Core prihvaća |
 | `Main2.cpp` se ne kompajlira | jedan program, jedan `main.cpp` |
 | nema validacije ulaza | strogi hex, provjera svake povratne vrijednosti |
@@ -170,6 +222,12 @@ libraryja — namjerno, da se svaki korak može pročitati.
 ## Ograničenja — što još NIJE napravljeno
 
 Ovo je pošteni popis, ne marketinški.
+
+**0. Iznos izlaza se ne može ograničiti bez covenanta.**
+`--protect` rješava *tko smije prvi* (korisnik), ali ne *koliko smije uzeti*. Korisnik koji
+izlazi podiže cijeli UTXO. Bez CTV/OP_CAT/BitVM2 nema načina da se u skripti provjeri
+"ovaj izlaz nosi točno moj balans iz state roota". To je najveće preostalo ograničenje i
+ono koje razdvaja ovaj kod od upotrebljivog L2 rješenja.
 
 **1. Verifikacija Merkle dokaza *unutar* skripte traži OP_CAT.**
 OP_CAT (BIP-347) nije aktiviran na Bitcoinu. Bez njega se u tapscriptu ne mogu spojiti dva
@@ -196,8 +254,12 @@ riješeno na razini HSM-a.
 
 **4. `--leaves` mora biti potencija dvojke** ako želiš descriptor usporedbu s Bitcoin Core.
 Razlog: descriptor jezik ne može izraziti `raw()` unutar `tr()`, pa se usporedba radi s
-`pk()` listovima. Za ne-potencije dvojke stablo je i dalje ispravno (testirano potrošnjom),
-samo se ne može jednoznačno opisati deskriptorom.
+`pk()` listovima. U `--protect` načinu descriptor se uopće ne ispisuje jer sadrži CSV listove
+koje `raw()` ne može opisati unutar `tr()` — adresa se tamo dokazuje potrošnjom, ne deskriptorom.
+
+**4b. Broj exit listova ≤ broj korisnika.** Ako je korisnika 5000, a listova 4096 (i još jedan
+za operatore), onda dio korisnika **nema nijednu on-chain putanju** — samo off-chain dokaz,
+koji bez covenanta ne vrijedi ništa. U produkciji broj listova mora biti ≥ broj korisnika + 1.
 
 **5. Ovo nije L2 protokol.** Nema konsenzusa među operatorima, nema gossip-a, nema
 perzistentnog stanja, nema oporavka od pada. To je kriptografska jezgra settlementa —
