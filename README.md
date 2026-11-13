@@ -8,7 +8,9 @@ Ovo nije samo benchmark agregacije ključeva. Ovo je program koji:
 - i omogući korisniku **unilateralni exit koji stvarno drži** — jer je operatorima
   key-path matematički onemogućen, a njihov CSV stroži od korisničkog,
 - a lažni izlaz se **oduzima javnim dokazom** unutar challenge prozora,
-- i ima **BitVM jezgru** u kojoj prover fizički ne može lagati o bitu bez gubitka bonda.
+- ima **BitVM jezgru** u kojoj prover fizički ne može lagati o bitu bez gubitka bonda,
+- i ima **BitVM2 matricu skriptova**: 8-bitni zbrajač kao 297 listova, gdje se svaki
+  gate provjerava zasebno i prijevara se dokazuje na lancu.
 
 Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu — ne ispisom u terminalu.
 
@@ -55,10 +57,25 @@ Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu �
 ────────────────────────────────────────────────────────────────
    test/run_bitvm.sh:     PASS: 11   FAIL: 0
 ════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════
+ 12. BITVM2 MATRICA SKRIPTOVA     (test/run_matrix.sh)
+ 1. Matrica                         ✅ 37 gatea × 8 + timeout = 297 listova, dubina 9
+ 2. Prover: konzistentan gate      ✅ prihvaćen + potvrđen
+ 3. Zadnji gate (carry out)         ✅ prihvaćen + potvrđen (indeks 291)
+ 4. Osporavatelj: nekonzistentan   ✅ prihvaćen — bond preuzet, potvrđen
+ 5. NEGATIVNI: pogrešan potpisnik   ✅ odbijen — Invalid Schnorr signature
+ 6. NEGATIVNI: obrnut potpisnik     ✅ odbijen — Invalid Schnorr signature
+ 7. NEGATIVNI: pogrešan preimage    ✅ odbijen — OP_EQUALVERIFY
+ 8. NEGATIVNI: timeout prije CSV    ✅ odbijen — non-BIP68-final
+ 9. Timeout nakon CSV-a             ✅ prihvaćen + potvrđen
+────────────────────────────────────────────────────────────────
+   test/run_matrix.sh:    PASS: 15   FAIL: 0
+════════════════════════════════════════════════════════════════
 ```
 
 Negativni testovi su namjerno tu: test koji uvijek prolazi ne dokazuje ništa.
-Testovi 4–6, sekcije 9 i 10 te testovi 3–6 BitVM suitea padaju s **točno onim
+Testovi 4–6, sekcije 9 i 10 te negativni testovi BitVM suitea padaju s **točno onim
 konsenzus greškama koje Bitcoin Core stvarno vraća**.
 
 ---
@@ -108,7 +125,7 @@ cd secp256k1
 make -j"$(nproc)" && make install
 cd ..
 
-# 2. programi (bec + bec-bitvm)
+# 2. programi (bec + bec-bitvm + bec-matrix)
 bash test/build.sh
 ```
 
@@ -176,7 +193,21 @@ export LD_LIBRARY_PATH=../secp-inst/lib
              --amount <sats> --dest-script <hex> --fee 2000 --sequence 96 \
              --prover-key <hex> --out timeout.hex
 
-# 7) dokaz da je korisnik u stanju
+# 7) BitVM2 matrica skriptova — 8-bitni zbrajač
+./bec-matrix build --bits 8 --csv 96 \
+             --prover-key <hex> --challenger-key <hex> --hrp bcrt --out matrix.txt
+
+#    prover dokazuje da je gate konzistentan
+./bec-matrix proof-ok --matrix matrix.txt --gate 0 --a 200 --b 100 \
+             --txid <txid> --vout <n> --amount <sats> --dest-script <hex> \
+             --fee 2000 --sequence 1 --prover-key <hex> --out ok.hex
+
+#    osporavatelj dokazuje da JEST nekonzistentan (i uzima bond)
+./bec-matrix proof-bad --matrix matrix.txt --gate 20 --a 200 --b 100 \
+             --txid <txid> --vout <n> --amount <sats> --dest-script <hex> \
+             --fee 2000 --sequence 1 --challenger-key <hex> --out bad.hex
+
+# 8) dokaz da je korisnik u stanju
 ./bec proof --keys keys.txt --commitment commitment.txt --index 7
 ```
 
@@ -192,11 +223,12 @@ export SECP_PREFIX=/put/do/secp-inst
 
 bash test/run_regtest.sh   # 28 provjera: MuSig2, Taproot, exiti, challenge
 bash test/run_bitvm.sh     # 11 provjera: BitVM bond, ekvivokacija, timeout
+bash test/run_matrix.sh    # 15 provjera: BitVM2 matrica, 8-bitni zbrajač
 ```
 
-Svaka skripta diže **vlastiti** regtest node (`.regtest-data/` odnosno `.regtest-bitvm/`),
-rudari svoje blokove i gasi ga na kraju. Ne dira postojeći node i ne dijele stanje.
-Ukupno 39 provjera, od kojih 9 negativnih.
+Svaka skripta diže **vlastiti** regtest node (`.regtest-data/`, `.regtest-bitvm/`,
+`.regtest-matrix/`), rudari svoje blokove i gasi ga na kraju. Ne dira postojeći node i
+ne dijele stanje. Ukupno 54 provjere, od kojih 14 negativnih.
 
 ---
 
@@ -336,6 +368,106 @@ SHA-256 — greška zbog koje je ovaj projekt i počeo.
 
 ---
 
+## BitVM2 matrica skriptova — 8-bitni zbrajač
+
+BitVM jezgra iz prethodne sekcije dokazuje samo *ekvivokaciju*: "prover je isti bit
+otvorio dvaput". To nije provjera **izračuna**. Matrica to mijenja.
+
+Ideja: svaki logički gate ima dvije ulazne žice i jednu izlaznu, dakle 8 kombinacija.
+Za XOR/AND/OR je točno **4 kombinacije konzistentne** s funkcijom gatea, a **4 nisu**.
+Za svaku od 8 kombinacija postoji vlastiti list, i svaki list potpisuje onaj kome ta
+kombinacija ide u prilog:
+
+```
+  konzistentna kombinacija   → list potpisuje PROVER        (dokaz da je gate dobar)
+  nekonzistentna kombinacija → list potpisuje OSPORAVATELJ  (dokaz prijevare)
+```
+
+Zato je matrica simetrična: 148 proverovih i 148 osporavateljevih listova. Isti witness
+format radi za oba puta — razlika je samo koji list i koji ključ.
+
+### Zbrajač
+
+Ripple-carry, 8 + 8 bitova → 8 bitova sume + carry out:
+
+```
+  bit 0:  s0 = a0 XOR b0 ,   c1 = a0 AND b0                        (2 gatea)
+  bit i:  t  = ai XOR bi ,   si = t XOR ci ,
+          u  = ai AND bi ,   v  = t AND ci ,   c(i+1) = u OR v     (5 gatea)
+
+  2 + 7×5 = 37 gatea,  54 žice (commitmenta),  37×8 + 1 = 297 listova
+  dubina skriptnog stabla 9  →  kontrolni blok 321 B
+```
+
+Provjereno offline na svih 256 ulaznih kombinacija prije nego je ijedan potpis
+napravljen: 0 grešaka. `200 + 100 = 300` daje sumu `0x2C` i `carry = 1` — što je i
+točno, jer 300 ne stane u 8 bitova.
+
+### List gatea — bez OP_CAT
+
+```
+  OP_SHA256 <h(wc,vc)> OP_EQUALVERIFY
+  OP_SHA256 <h(wb,vb)> OP_EQUALVERIFY
+  OP_SHA256 <h(wa,va)> OP_EQUALVERIFY
+  <ključ> OP_CHECKSIG
+
+  h(w,v) = SHA256( SHA256( 0x02 ‖ w_le32 ‖ v ‖ salt ) )
+  witness = [sig, preimage(wa,va), preimage(wb,vb), preimage(wc,vc)]
+```
+
+Ne provjeravamo "hash(va‖vb‖vc) == commitment" — to bi tražilo OP_CAT. Provjeravamo
+**svaku žicu zasebno**, pa se tri 32-bajtna preimagea predaju u witnessu i svaki se
+hashira u svoj commitment. Ništa se ne spaja na lancu, pa OP_CAT nije potreban.
+
+Redoslijed u skriptu je obrnut od redoslijeda u witnessu jer Script troši s vrha
+stacka. To je detalj zbog kojeg skript tiho pada ako se pogodi naopako.
+
+### Provjereno na nodeu
+
+| scenarij | rezultat |
+|---|---|
+| prover: konzistentan gate + njegov ključ | **prihvaćen, potvrđen** |
+| prover: zadnji gate (carry out), indeks 291 | **prihvaćen, potvrđen** |
+| osporavatelj: nekonzistentan gate + njegov ključ | **prihvaćen, bond preuzet, potvrđen** |
+| konzistentan list, potpisao osporavatelj | odbijen `Invalid Schnorr signature` |
+| nekonzistentan list, potpisao prover | odbijen `Invalid Schnorr signature` |
+| pogrešan preimage | odbijen `OP_EQUALVERIFY failed` |
+| proverov timeout prije CSV-a | odbijen `non-BIP68-final` |
+| proverov timeout nakon CSV-a | **prihvaćen, potvrđen** |
+
+Ključni par su testovi 4 i 6. Isti gate, isti list, ista transakcija — ali u jednom
+slučaju potpisuje ključ koji tom listu pripada, a u drugom ne. Ishod je suprotan.
+To je dokaz da matrica stvarno razlikuje "gate je dobar" od "gate je pokvaren", a ne
+da test prolazi sam od sebe.
+
+### Što ovo još nije — i zašto je to važno
+
+Ovo je **jedan gate po transakciji**. Da bi se dokazalo da je cijelih 37 gatea
+konzistentno, treba ili 37 transakcija, ili bisection protokol. BitVM2 koristi
+bisection: osporavatelj i prover se logaritamski sužavaju na jedan sporan gate, pa
+osporavanje cijelog izračuna stane u O(log n) rundi.
+
+| BitVM2 ima | Ovdje |
+|---|---|
+| matrica skriptova po gateu | ✅ — 8 listova po gateu, 297 za zbrajač |
+| odvojen proverov i osporavateljev put | ✅ — po ključu u listu |
+| bez OP_CAT (tri odvojena commitmenta) | ✅ |
+| bisection preko razina poziva | ✗ — jedan gate po transakciji |
+| garbled circuits za same vrijednosti žica | ✗ — žice su proverove tvrdnje |
+| commitment na cijeli program | ✗ — samo na matricu gateova |
+
+Dakle: **matrica je stvarna i radi na konsenzusu**, ali protokol oko nje nije potpun.
+Bez bisectiona osporavanje košta O(n) transakcija, što je za zbrajač izvedivo, a za
+stvarni program ne.
+
+### Ime, opet
+
+Ovo je prvi komad BitVM2 koji je doista BitVM2: gate matrica s odvojenim proverovim i
+osporavateljevim putem. Ono što nedostaje nije kriptografija nego **protokol** —
+bisection. Zato u naslovu piše "matrica skriptova", a ne "BitVM2".
+
+---
+
 ## Što je u kodu
 
 | Datoteka | Sadržaj |
@@ -347,9 +479,12 @@ SHA-256 — greška zbog koje je ovaj projekt i počeo.
 | `src/challenge.hpp` | challenge/response: claim list, challenge list, claim_digest |
 | `src/bitvm.hpp` | BitVM jezgra: bit commitment (h0/h1), penalty list, bond timeout |
 | `src/bitvm_main.cpp` | CLI `bec-bitvm`: `bond`, `penalty`, `timeout` (zaseban binarij) |
+| `src/gate_matrix.hpp` | **BitVM2 matrica**: žičani commitmenti, 8 listova po gateu, 8-bitni zbrajač |
+| `src/matrix_main.cpp` | CLI `bec-matrix`: `build`, `proof-ok`, `proof-bad`, `timeout` |
 | `src/main.cpp` | CLI: `genkeys`, `commit`, `spend-keypath`, `spend-scriptpath`, `spend-op-exit`, `spend-challenge`, `proof` |
 | `test/run_regtest.sh` | MuSig2 / Taproot / exiti / challenge: 28 provjera, 6 negativnih |
 | `test/run_bitvm.sh` | BitVM jezgra: 11 provjera, 4 negativne |
+| `test/run_matrix.sh` | BitVM2 matrica: 15 provjera, 4 negativne |
 
 Nema vanjskih ovisnosti osim `libsecp256k1`. Nema OpenSSL-a, nema boost-a, nema Bitcoin Core
 libraryja — namjerno, da se svaki korak može pročitati.
@@ -415,8 +550,9 @@ koje `raw()` ne može opisati unutar `tr()` — adresa se tamo dokazuje potrošn
 za operatore), onda dio korisnika **nema nijednu on-chain putanju** — samo off-chain dokaz,
 koji bez covenanta ne vrijedi ništa. U produkciji broj listova mora biti ≥ broj korisnika + 1.
 
-**5. BitVM jezgra je primitiv, ne protokol.** Vidi tablicu u sekciji iznad — nema garbled
-circuits ni bisection preko razina poziva, pa se njome ne može provjeriti cijeli izračun.
+**5. Matrica provjerava jedan gate, ne cijeli izračun.** Bez bisection protokola
+osporavanje zbrajača košta do 37 transakcija umjesto O(log 37) ≈ 6. Kriptografija je tu;
+protokol nije. Vidi tablicu u sekciji o matrici.
 
 **6. Ovo nije L2 protokol.** Nema konsenzusa među operatorima, nema gossip-a, nema
 perzistentnog stanja, nema oporavka od pada. To je kriptografska jezgra settlementa —
@@ -430,8 +566,8 @@ temelj na koji se L2 priča može graditi, ne gotov L2.
   *"Experimental features do not have stable APIs or properties, and may not be safe for
   production use."* Ovo nije kod za držanje stvarnih sredstava bez vanjskog audita.
 - Privatni ključevi u testu su generirani lokalno i namijenjeni isključivo regtestu.
-- `keys.txt`, `operators.txt`, `prover.txt`, `challenger.txt` i `bond.txt` sadrže **tajne
-  u čistom tekstu**. Nikad ih ne commitaj u git. Dodani su u `.gitignore`.
+- `keys.txt`, `operators.txt`, `prover.txt`, `challenger.txt`, `bond.txt`, `matrix.txt` sadrže
+  **tajne u čistom tekstu**. Nikad ih ne commitaj u git. Dodani su u `.gitignore`.
 
 ---
 

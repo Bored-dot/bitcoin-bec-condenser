@@ -1,0 +1,65 @@
+
+═══ 0. Bitcoin Core regtest
+  verzija: Bitcoin Core version v27.1.0
+  blokova: 150
+  ✅ PASS  regtest node radi
+
+═══ 1. Matrica skriptova — 8-bitni zbrajač
+  Žica (commitmenta)                   : 54
+  Gatea                                : 37
+  Listova ukupno (8 po gateu + timeout): 297
+    · proverovi (konzistentni)         : 148
+    · osporavateljevi (nekonzistentni) : 148
+  Dubina skriptnog stabla              : 9  (kontrolni blok 321 B)
+  bech32m adresa (bcrt)              : bcrt1php9nhcjq46mwqn2gqrnff93s5qnuwrme49teghhwllkuq3tvunxsfyql8p
+  ✅ PASS  297 listova (37 gatea × 8 + timeout)
+  ✅ PASS  37 gatea za 8-bitni zbrajač
+
+═══ 2. Prover dokazuje KONZISTENTAN gate (gate 0, 200+100)
+  funding: 52f72ca3ca93a514ad9d498056389c4b43f0942b852477d279b8ef5906f46de2 vout=0
+  Gate                         : 0 (XOR, žice 0,8 -> 16)
+  Otkriveno (va,vb,vc)         : 0,0,0   ← stvarno 0
+  Kombinacija u matrici        : k=0  (KONZISTENTNA)
+  Indeks lista                 : 0 od 297
+  Potpisnik                    : PROVER
+  ✅ PASS  prover: konzistentan gate + njegov ključ — node prihvaća
+  ✅ PASS  dokaz konzistentnosti potvrđen u bloku
+
+═══ 3. Zadnji gate (36) — indeks 291, ne-potencija dvojke
+  Gate                         : 36 (OR, žice 52,53 -> 32)
+  Otkriveno (va,vb,vc)         : 0,1,1   ← stvarno 1
+  Indeks lista                 : 291 od 297
+  255+1=256 → 8 bitova sume 0 + carry out 1
+  ✅ PASS  zadnji gate (carry out) konzistentan — node prihvaća
+  ✅ PASS  zadnji gate potvrđen u bloku
+
+═══ 4. Osporavatelj dokazuje NEKONZISTENTAN gate i preuzima bond
+  Gate                         : 20 (AND, žice 42,28 -> 44)
+  Otkriveno (va,vb,vc)         : 0,0,1   ← vc je KRIVO (stvarno 0)
+  Kombinacija u matrici        : k=1  (NEKONZISTENTNA)
+  Indeks lista                 : 161 od 297
+  Potpisnik                    : OSPORAVATELJ
+  ✅ PASS  osporavatelj: nekonzistentan gate + njegov ključ — node prihvaća
+  ✅ PASS  osporavatelj preuzeo bond (potvrđeno u bloku)
+
+═══ 5. NEGATIVNI — konzistentan list, potpisao OSPORAVATELJ
+  ✅ PASS  konzistentan list + pogrešan potpisnik — node odbija: mandatory-script-verify-flag-failed (Invalid Schnorr signature)
+
+═══ 6. NEGATIVNI — nekonzistentan list, potpisao PROVER
+  ✅ PASS  nekonzistentan list + pogrešan potpisnik — node odbija: mandatory-script-verify-flag-failed (Invalid Schnorr signature)
+
+═══ 7. NEGATIVNI — pogrešan preimage (ne hashira na commitment)
+  ✅ PASS  pogrešan preimage — node odbija: mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)
+
+═══ 8. NEGATIVNI — timeout prije CSV-a
+  ✅ PASS  timeout prije CSV-a — node odbija: non-BIP68-final
+
+═══ 9. Timeout nakon CSV-a
+  visina: 257
+  Indeks lista                 : 296 (timeout, zadnji)
+  ✅ PASS  timeout nakon CSV-a — node prihvaća
+  ✅ PASS  prover vratio bond nakon CSV-a (potvrđeno)
+
+═══ SAŽETAK
+  PASS: 15   FAIL: 0
+  🎉 SVI TESTOVI PROŠLI — matrica skriptova potvrđena na Bitcoin Core konsenzusu.
