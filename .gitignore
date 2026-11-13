@@ -3,6 +3,7 @@ bec
 bec-bitvm
 bec-matrix
 bec-vtxo
+bec-l2
 *.o
 
 # lokalno stanje testa
@@ -14,6 +15,8 @@ bec-vtxo
 .testrun-matrix/
 .regtest-vtxo/
 .testrun-vtxo/
+.regtest-l2/
+.testrun-l2/
 
 # TAJNI KLJUČEVI — nikad ne commitaj
 keys.txt
@@ -25,6 +28,9 @@ challenger.txt
 matrix.txt
 round.txt
 op.txt
+state.txt
+s0*.txt
+s1.txt
 
 # izlaz
 *.hex
