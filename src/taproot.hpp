@@ -182,8 +182,12 @@ struct TapScriptTree {
             const std::vector<unsigned char>& cur = levels[lvl];
             size_t n = cur.size() / 32;
             size_t sib = index ^ 1;
-            if (sib >= n) sib = index;
-            p.insert(p.end(), &cur[sib * 32], &cur[sib * 32] + 32);
+            // BIP-341: ako je zadnji čvor neparan, on se PROMOVIRA na razinu
+            // iznad — nema brata, pa nema ni elementa u putu. Dodavanje
+            // vlastitog hasha ovdje proizvede kontrolni blok pogrešne duljine
+            // i node ga odbija s "Witness program hash mismatch".
+            if (sib < n)
+                p.insert(p.end(), &cur[sib * 32], &cur[sib * 32] + 32);
             index /= 2;
         }
         return p;

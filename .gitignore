@@ -1,18 +1,24 @@
 # binariji
 bec
+bec-bitvm
 *.o
 
 # lokalno stanje testa
 .regtest-data/
 .testrun/
+.regtest-bitvm/
+.testrun-bitvm/
 
 # TAJNI KLJUČEVI — nikad ne commitaj
 keys.txt
 operators.txt
 keys*.txt
 operators*.txt
+prover.txt
+challenger.txt
 
 # izlaz
 *.hex
 commitment.txt
+bond.txt
 cm*.txt

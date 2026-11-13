@@ -1,0 +1,42 @@
+
+═══ 0. Bitcoin Core regtest
+  verzija: Bitcoin Core version v27.1.0
+  blokova: 150
+  ✅ PASS  regtest node radi
+
+═══ 1. Bond
+  Bitova (penalty listova)             : 8
+  Timeout CSV (blokovi)                : 96
+  Dubina skriptnog stabla              : 4
+  Internal key                         : NUMS (key-path nemoguć)
+  bech32m adresa (bcrt)              : bcrt1p5khmjud5rzjkdaahvrj8gfuz5dalrs8620rdnvevrlqz5w9w9khsuuhcav
+  ✅ PASS  bond output izgrađen (8 penalty listova + 1 timeout)
+  ✅ PASS  commitment hashevi h0/h1 zapisani za svaki bit
+
+═══ 2. Kazna — ekvivokacija dokazana (OBA preimagea)
+  funding: ff744fdb60493adad3621e5999bb365a07ec4b05af8ae7d462e5e3d92a053c48 vout=1 (1000000 sats)
+  Indeks bita                  : 3
+  Dubina dokaza                : 4 (161 B)
+  ✅ PASS  kazna s OBA preimagea — node prihvaća
+  ✅ PASS  osporavatelj preuzeo bond (potvrđeno u bloku)
+
+═══ 3. NEGATIVNI — kazna s POGREŠNIM preimageom
+  ✅ PASS  kazna s POGREŠNIM preimageom — node odbija: mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)
+
+═══ 4. NEGATIVNI — kazna sa SAMO JEDNIM preimageom
+  ✅ PASS  kazna sa SAMO JEDNIM preimageom — node odbija: mandatory-script-verify-flag-failed (Script failed an OP_EQUALVERIFY operation)
+
+═══ 5. NEGATIVNI — ispravan dokaz, POGREŠAN potpisnik
+  ✅ PASS  kazna s pogrešnim potpisnikom — node odbija: mandatory-script-verify-flag-failed (Invalid Schnorr signature)
+
+═══ 6. NEGATIVNI — proverov timeout PRIJE CSV-a
+  ✅ PASS  timeout prije CSV-a — node odbija: non-BIP68-final
+
+═══ 7. Proverov timeout NAKON CSV-a
+  visina nakon CSV-a: 252
+  ✅ PASS  timeout nakon CSV-a — node prihvaća
+  ✅ PASS  prover vratio bond nakon CSV-a (potvrđeno)
+
+═══ SAŽETAK
+  PASS: 11   FAIL: 0
+  🎉 SVI TESTOVI PROŠLI — BitVM jezgra potvrđena na Bitcoin Core konsenzusu.

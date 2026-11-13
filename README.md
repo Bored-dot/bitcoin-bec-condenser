@@ -7,7 +7,8 @@ Ovo nije samo benchmark agregacije ključeva. Ovo je program koji:
 - potpiše ga **pravim MuSig2 protokolom u dvije runde**,
 - i omogući korisniku **unilateralni exit koji stvarno drži** — jer je operatorima
   key-path matematički onemogućen, a njihov CSV stroži od korisničkog,
-- a lažni izlaz se **oduzima javnim dokazom** unutar challenge prozora.
+- a lažni izlaz se **oduzima javnim dokazom** unutar challenge prozora,
+- i ima **BitVM jezgru** u kojoj prover fizički ne može lagati o bitu bez gubitka bonda.
 
 Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu — ne ispisom u terminalu.
 
@@ -39,12 +40,26 @@ Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu �
     · osporavanje, ispravan dokaz  ✅ prihvaćen + potvrđen u bloku
     · tvrdnja nakon prozora        ✅ prihvaćen + potvrđen u bloku
 ────────────────────────────────────────────────────────────────
-   PASS: 28   FAIL: 0
+   test/run_regtest.sh:   PASS: 28   FAIL: 0
+════════════════════════════════════════════════════════════════
+
+════════════════════════════════════════════════════════════════
+ 11. BITVM JEZGRO                  (test/run_bitvm.sh)
+ 1. Bond                           ✅ 8 penalty listova + timeout, h0/h1 u skriptu
+ 2. Kazna s OBA preimagea          ✅ prihvaćen + potvrđen — ekvivokacija dokazana
+ 3. NEGATIVNI: pogrešan preimage   ✅ odbijen — OP_EQUALVERIFY
+ 4. NEGATIVNI: samo jedan preimage ✅ odbijen — OP_EQUALVERIFY
+ 5. NEGATIVNI: pogrešan potpisnik  ✅ odbijen — Invalid Schnorr signature
+ 6. NEGATIVNI: timeout prije CSV   ✅ odbijen — non-BIP68-final
+ 7. Timeout nakon CSV-a            ✅ prihvaćen + potvrđen
+────────────────────────────────────────────────────────────────
+   test/run_bitvm.sh:     PASS: 11   FAIL: 0
 ════════════════════════════════════════════════════════════════
 ```
 
 Negativni testovi su namjerno tu: test koji uvijek prolazi ne dokazuje ništa.
-Testovi 4–6 te sekcije 9 i 10 padaju s **točno onim konsenzus greškama koje Bitcoin Core stvarno vraća**.
+Testovi 4–6, sekcije 9 i 10 te testovi 3–6 BitVM suitea padaju s **točno onim
+konsenzus greškama koje Bitcoin Core stvarno vraća**.
 
 ---
 
@@ -93,11 +108,7 @@ cd secp256k1
 make -j"$(nproc)" && make install
 cd ..
 
-# 2. program
-g++ -std=c++17 -O2 -I../secp-inst/include src/main.cpp -o bec \
-    -L../secp-inst/lib -lsecp256k1
-
-# ili sve odjednom:
+# 2. programi (bec + bec-bitvm)
 bash test/build.sh
 ```
 
@@ -151,7 +162,21 @@ export LD_LIBRARY_PATH=../secp-inst/lib
              --amount <sats> --dest-script <hex> --fee 2000 --leaf 2 \
              --challenger-key <hex> --sequence 1 --out challenge.hex
 
-# 6) dokaz da je korisnik u stanju
+# 6) BitVM jezgra: bond + kazna za ekvivokaciju
+./bec-bitvm bond --bits 8 --csv 96 \
+             --prover-key <hex> --challenger-key <hex> --hrp bcrt --out bond.txt
+
+#    kazna: potrošivo SAMO s oba preimagea istog bita
+./bec-bitvm penalty --bond bond.txt --index 3 --txid <txid> --vout <n> \
+             --amount <sats> --dest-script <hex> --fee 2000 --sequence 1 \
+             --challenger-key <hex> --out penalty.hex
+
+#    prover vraća bond nakon CSV-a
+./bec-bitvm timeout --bond bond.txt --txid <txid> --vout <n> \
+             --amount <sats> --dest-script <hex> --fee 2000 --sequence 96 \
+             --prover-key <hex> --out timeout.hex
+
+# 7) dokaz da je korisnik u stanju
 ./bec proof --keys keys.txt --commitment commitment.txt --index 7
 ```
 
@@ -162,12 +187,16 @@ export LD_LIBRARY_PATH=../secp-inst/lib
 ## Test na Bitcoin Core
 
 ```bash
-BITCOIN_BIN=/put/do/bitcoin-27.1/bin SECP_PREFIX=/put/do/secp-inst \
-    bash test/run_regtest.sh
+export BITCOIN_BIN=/put/do/bitcoin-27.1/bin
+export SECP_PREFIX=/put/do/secp-inst
+
+bash test/run_regtest.sh   # 28 provjera: MuSig2, Taproot, exiti, challenge
+bash test/run_bitvm.sh     # 11 provjera: BitVM bond, ekvivokacija, timeout
 ```
 
-Skripta diže vlastiti regtest node u `.regtest-data/`, rudari 150 blokova, i vozi svih
-28 testa od nule (~45 s, jer sekcije 9 i 10 rudare 144 + 288 + 96 blokova). Ne dira postojeći node.
+Svaka skripta diže **vlastiti** regtest node (`.regtest-data/` odnosno `.regtest-bitvm/`),
+rudari svoje blokove i gasi ga na kraju. Ne dira postojeći node i ne dijele stanje.
+Ukupno 39 provjera, od kojih 9 negativnih.
 
 ---
 
@@ -204,11 +233,11 @@ ali nije više 99 vB. To je namjerna zamjena — bez nje exit nije garancija.
 
 **Što ovime NIJE riješeno:** bez covenanta se iznos izlaza ne može ograničiti, pa korisnik
 koji izađe podiže **cijeli UTXO**, ne samo svoj balans. Zaštita je time "prvi koji izađe
-uzima sve", a ne per-korisničko poravnanje. Rješava se jedino kroz CTV / OP_CAT / BitVM2.
+uzima sve", a ne per-korisničko poravnanje.
 
 ---
 
-## Challenge/response — zatvaranje pukotine
+## Challenge/response — lažni izlaz se oduzima
 
 `--protect` rješava *tko smije prvi*. Nije rješavao *koliko smije uzeti*: korisnik
 koji izađe podigne **cijeli UTXO**, ne samo svoj balans, i nitko ga ne može kazniti.
@@ -242,13 +271,68 @@ neporeciv i provjerljiv nakon činjenice.
 
 **Što ostaje pretpostavka (i piše u kodu, `src/challenge.hpp`):**
 - **Da je tvrdnja lažna provjerava se izvan lanca.** Na lancu se dokazuje samo da je
-  osporavatelj otkrio točno onaj dokaz na koji se korisnik vezao. BitVM2 bi i tu
-  provjeru doveo na lanac kroz bit-commitments.
+  osporavatelj otkrio točno onaj dokaz na koji se korisnik vezao.
 - **Netko mora gledati.** Ako nitko ne ospori u prozoru, lažna tvrdnja prolazi.
-  Ista pretpostavka kao kod svakog optimistic rollupa: dovoljan je jedan pošteni
-  promatrač.
-- **Utrka je moguća.** Challenge i claim su konkurentne transakcije na istom UTXO-u;
-  bez covenanta se to ne može ukloniti, samo učiniti skupim i javno dokazivim.
+- **Utrka je moguća.** Challenge i claim su konkurentne transakcije na istom UTXO-u.
+
+---
+
+## BitVM jezgra — bit-commitment bond
+
+Challenge/response iz prethodne sekcije ima jednu pretpostavku: *da je tvrdnja lažna
+provjerava se izvan lanca*. BitVM ide korak dalje — prover **fizički ne može** lagati
+o pojedinom bitu svog međurezultata, jer bi ga to koštalo bonda.
+
+Ovdje je implementirana ta jezgra, i provjerena na nodeu:
+
+```
+  za svaki indeks bita i postoje dva commitmenta:
+      h0(i) = SHA256( SHA256( 0x00 || 0x00 || i_le32 || salt ) )
+      h1(i) = SHA256( SHA256( 0x00 || 0x01 || i_le32 || salt ) )
+
+  penalty list za indeks i:
+      OP_SHA256 <h1(i)> OP_EQUALVERIFY
+      OP_SHA256 <h0(i)> OP_EQUALVERIFY
+      <challenger> OP_CHECKSIG
+
+  → potrošiv SAMO s witnessom [sig, preimage(0,i), preimage(1,i)]
+```
+
+To je važna razlika u odnosu na "osporavatelj tvrdi da je laž". Ekvivokacija nije
+tvrdnja koju netko mora dokazati — ona je **uvjet bez kojeg skript ne prolazi**.
+Tko otvori oba bita istog indeksa, predao je bond; tko ne otvori, ne može ga ni
+dotaknuti. Provjereno:
+
+| scenarij | rezultat |
+|---|---|
+| kazna s oba preimagea | **prihvaćen, bond preuzet, potvrđen** |
+| kazna s pogrešnim preimageom | odbijen `OP_EQUALVERIFY failed` |
+| kazna sa samo jednim preimageom | odbijen `OP_EQUALVERIFY failed` |
+| kazna s ispravnim dokazom, pogrešan potpisnik | odbijen `Invalid Schnorr signature` |
+| proverov timeout prije CSV-a | odbijen `non-BIP68-final` |
+| proverov timeout nakon CSV-a | **prihvaćen, potvrđen** |
+
+Internal key je NUMS, pa je key-path nemoguć i sve ide preko skriptnog stabla —
+ista konstrukcija kao u `--protect`.
+
+### Što je ovo, a što nije
+
+**Ovo je BitVM primitiv, ne BitVM2 protokol.** Razlika je bitna i ne želim je zamutiti:
+
+| BitVM2 ima | Ovdje |
+|---|---|
+| garbled circuits / matrice skriptova koje provjeravaju cijeli izraz | ✗ — provjerava se **jedan bit**, ne izraz |
+| bisection protokol preko razina poziva | ✗ — jedan sloj, indeks bira osporavatelj |
+| na-lancu provjeru da je otkriveni bit **ispravan za tvrdnju** | ✗ — na lancu se dokazuje samo da su otkrivena **dva proturječna** bita |
+| commit na cijeli program i njegove međurezultate | ✗ — commit na N bitova koje prover sam bira |
+
+Dakle: ono što je stvarno zatvoreno je **ekvivokacija**. Prover koji za isti bit
+tvrdi i 0 i 1 gubi bond, i to je dokazivo na lancu bez ikakve pretpostavke o
+promatraču. Ono što nije zatvoreno je da je *pojedinačni* otkriveni bit lažan za
+tvrdnju — to bi tražilo garbled circuits, što je red veličine veći posao.
+
+Ime je važno. Nazvati ovo "BitVM2" bilo bi isto kao tvrditi da je `sha256_double`
+SHA-256 — greška zbog koje je ovaj projekt i počeo.
 
 ---
 
@@ -261,8 +345,11 @@ neporeciv i provjerljiv nakon činjenice.
 | `src/musig.hpp` | **BIP-327** MuSig2: agregacija ključeva, dvije runde, agregacija potpisa, taptweak kroz keyagg cache |
 | `src/protect.hpp` | NUMS internal key + operatorski CSV list (zaštita exita) |
 | `src/challenge.hpp` | challenge/response: claim list, challenge list, claim_digest |
+| `src/bitvm.hpp` | BitVM jezgra: bit commitment (h0/h1), penalty list, bond timeout |
+| `src/bitvm_main.cpp` | CLI `bec-bitvm`: `bond`, `penalty`, `timeout` (zaseban binarij) |
 | `src/main.cpp` | CLI: `genkeys`, `commit`, `spend-keypath`, `spend-scriptpath`, `spend-op-exit`, `spend-challenge`, `proof` |
-| `test/run_regtest.sh` | End-to-end test na Bitcoin Core: 28 provjera, uključujući 6 negativnih testova |
+| `test/run_regtest.sh` | MuSig2 / Taproot / exiti / challenge: 28 provjera, 6 negativnih |
+| `test/run_bitvm.sh` | BitVM jezgra: 11 provjera, 4 negativne |
 
 Nema vanjskih ovisnosti osim `libsecp256k1`. Nema OpenSSL-a, nema boost-a, nema Bitcoin Core
 libraryja — namjerno, da se svaki korak može pročitati.
@@ -284,6 +371,7 @@ libraryja — namjerno, da se svaki korak može pročitati.
 | `Main2.cpp` se ne kompajlira | jedan program, jedan `main.cpp` |
 | nema validacije ulaza | strogi hex, provjera svake povratne vrijednosti |
 | nema `context_randomize` | randomiziran kontekst, `secure_zero` nad tajnama |
+| — | **bug nađen i popravljen:** promovirani čvor u ne-potenciji dvojke dobivao je lažni sibling |
 
 ---
 
@@ -292,11 +380,11 @@ libraryja — namjerno, da se svaki korak može pročitati.
 Ovo je pošteni popis, ne marketinški.
 
 **0. Iznos izlaza se ne može provjeriti U SKRIPTI — brani se ekonomski, ne kriptografski.**
-`--challenge` čini lažnu tvrdnju kažnjivom (digest u skriptu + prozor + oduzimanje uz dokaz),
-pa se prijevara ne isplati. Ali skripta i dalje **ne zna** koliko korisniku pripada — to se
-provjerava izvan lanca. Za kriptografsku garanciju treba covenant (CTV / OP_CAT) ili BitVM2
-bit-commitments koji bi "claim ≤ balans" provjerili na lancu. To je najveće preostalo
-ograničenje i ono koje razdvaja ovaj kod od upotrebljivog L2 rješenja.
+`--challenge` čini lažnu tvrdnju kažnjivom, a BitVM jezgra čini ekvivokaciju dokazivom
+na lancu. Ali skripta i dalje **ne zna** koliko korisniku pripada, niti da je pojedini
+otkriveni bit lažan za tvrdnju — to se provjerava izvan lanca. Za kriptografsku
+garanciju treba covenant (CTV / OP_CAT) ili pun BitVM2 s garbled circuits.
+Najveće preostalo ograničenje i ono koje razdvaja ovaj kod od upotrebljivog L2 rješenja.
 
 **1. Verifikacija Merkle dokaza *unutar* skripte traži OP_CAT.**
 OP_CAT (BIP-347) nije aktiviran na Bitcoinu. Bez njega se u tapscriptu ne mogu spojiti dva
@@ -305,9 +393,6 @@ Zato je ovdje:
 - state root **komitiran u output key** (preko svakog exit lista) — mijenjanje stanja mijenja adresu;
 - inclusion proof se **provjerava off-chain** (`./bec proof`);
 - on-chain exit ide preko **CSV delay + korisnikov ključ** — korisnik stvarno može izaći sam.
-
-Alternativa koja radi danas, bez soft forka: **BitVM2** (optimistic exit s challenge periodom).
-To je zaseban, velik posao i nije u ovom kodu.
 
 **2. Dvije runde komunikacije su stvarno usko grlo.**
 U testu su svi potpisnici u istom procesu. U stvarnosti 3 operatora moraju razmijeniti nonce
@@ -330,7 +415,10 @@ koje `raw()` ne može opisati unutar `tr()` — adresa se tamo dokazuje potrošn
 za operatore), onda dio korisnika **nema nijednu on-chain putanju** — samo off-chain dokaz,
 koji bez covenanta ne vrijedi ništa. U produkciji broj listova mora biti ≥ broj korisnika + 1.
 
-**5. Ovo nije L2 protokol.** Nema konsenzusa među operatorima, nema gossip-a, nema
+**5. BitVM jezgra je primitiv, ne protokol.** Vidi tablicu u sekciji iznad — nema garbled
+circuits ni bisection preko razina poziva, pa se njome ne može provjeriti cijeli izračun.
+
+**6. Ovo nije L2 protokol.** Nema konsenzusa među operatorima, nema gossip-a, nema
 perzistentnog stanja, nema oporavka od pada. To je kriptografska jezgra settlementa —
 temelj na koji se L2 priča može graditi, ne gotov L2.
 
@@ -342,8 +430,8 @@ temelj na koji se L2 priča može graditi, ne gotov L2.
   *"Experimental features do not have stable APIs or properties, and may not be safe for
   production use."* Ovo nije kod za držanje stvarnih sredstava bez vanjskog audita.
 - Privatni ključevi u testu su generirani lokalno i namijenjeni isključivo regtestu.
-- `keys.txt` i `operators.txt` sadrže **privatne ključeve u čistom tekstu**. Nikad ih ne
-  commitaj u git. Dodani su u `.gitignore`.
+- `keys.txt`, `operators.txt`, `prover.txt`, `challenger.txt` i `bond.txt` sadrže **tajne
+  u čistom tekstu**. Nikad ih ne commitaj u git. Dodani su u `.gitignore`.
 
 ---
 
