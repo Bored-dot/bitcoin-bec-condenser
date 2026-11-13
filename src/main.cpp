@@ -8,13 +8,15 @@
 //   4. Izračuna BIP-341 taptweak i Taproot output key + bech32m adresu.
 //   5. (spend-keypath)    MuSig2 potpis preko BIP-341 sighasha -> key-path spend
 //   6. (spend-scriptpath) korisnikov unilateralni exit preko skripte + CSV delay
-//   7. (proof)            inclusion proof korisnika u state root
+//   7. (spend-op-exit)    operatorska putanja preko skriptnog lista (CSV stroži)
+//   8. (proof)            inclusion proof korisnika u state root
 //
 // Build: vidi test/build.sh
 
 #include "crypto.hpp"
 #include "taproot.hpp"
 #include "musig.hpp"
+#include "protect.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -85,6 +87,11 @@ static int cmd_commit(int argc, char** argv) {
     const std::string out_path  = arg_value(argc, argv, "--out", "commitment.txt");
     const std::string hrp       = arg_value(argc, argv, "--hrp", "bcrt");
     const uint32_t delay        = (uint32_t)std::stoul(arg_value(argc, argv, "--delay", "10"));
+    // --protect: internal key = NUMS (key-path nemoguć) + operatorski list s dužim CSV-om.
+    // Bez toga operatori mogu potrošiti output odmah i pretrčati korisnički exit.
+    const bool protect          = arg_present(argc, argv, "--protect");
+    const uint32_t op_delay     = (uint32_t)std::stoul(arg_value(argc, argv, "--op-delay",
+                                       std::to_string(delay * 2)));
     const std::string leaf_mode = arg_value(argc, argv, "--leaf-mode", "exit"); // exit | pk
     size_t leaves               = (size_t)std::stoul(arg_value(argc, argv, "--leaves", "64"));
 
@@ -135,9 +142,15 @@ static int cmd_commit(int argc, char** argv) {
         leaves = p2;
     }
 
+    if (protect && op_delay <= delay)
+        die("--op-delay mora biti STROGO veći od --delay, inače operatori mogu pretrčati korisnike");
+
     std::vector<std::vector<unsigned char>> scripts;
     scripts.reserve(leaves);
-    for (size_t i = 0; i < leaves; i++) {
+    // Ako je --protect, list 0 je operatorski; korisnici počinju od 1.
+    const size_t user_leaf_offset = protect ? 1 : 0;
+    const size_t n_user_leaves = leaves > user_leaf_offset ? leaves - user_leaf_offset : 0;
+    for (size_t i = 0; i < n_user_leaves; i++) {
         unsigned char ux[32];
         secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, ux, &users[i].xonly);
         if (leaf_mode == "pk") {
@@ -150,6 +163,26 @@ static int cmd_commit(int argc, char** argv) {
             scripts.push_back(exit_leaf_script(state_root, ux, delay));
         }
     }
+    // operatorski list ide na index 0 (samo u --protect načinu)
+    unsigned char op_agg_ser[32] = {0};
+    if (protect) {
+        std::vector<std::string> ops_pre = read_lines(ops_path);
+        std::vector<secp256k1_pubkey> op_pks_pre;
+        for (const std::string& line : ops_pre) {
+            unsigned char sk[32];
+            if (!from_hex32(line, sk)) die("neispravan operatorski ključ");
+            Signer sg;
+            if (!MusigAggregator::make_signer(agg_ctx.ctx, sk, sg)) die("neispravan operatorski ključ");
+            secure_zero(sk, 32);
+            op_pks_pre.push_back(sg.pk);
+        }
+        if (op_pks_pre.empty()) die("nema operatorskih ključeva");
+        KeyAgg ka_pre;
+        ka_pre.aggregate(agg_ctx.ctx, op_pks_pre, nullptr);
+        std::memcpy(op_agg_ser, ka_pre.agg_ser, 32);
+        scripts.insert(scripts.begin(), csv_checksig_script(op_agg_ser, op_delay));
+    }
+
     TapScriptTree sc_tree;
     sc_tree.build(scripts);
     unsigned char script_root[32];
@@ -174,14 +207,28 @@ static int cmd_commit(int argc, char** argv) {
     KeyAgg ka;
     ka.aggregate(agg_ctx.ctx, op_pks, nullptr);
     unsigned char internal[32];
-    std::memcpy(internal, ka.agg_ser, 32);
+    if (protect) {
+        // NUMS: nitko ne zna diskretni log, pa key-path ne postoji.
+        std::memcpy(internal, nums_internal_key(), 32);
+    } else {
+        std::memcpy(internal, ka.agg_ser, 32);
+    }
 
     // ---- BIP-341 taptweak (ručno, da uhvatimo parity output ključa) ----
     TaprootCommitment c;
     tap_tweak(internal, script_root, c);
     secp256k1_pubkey tweaked;
-    if (!secp256k1_musig_pubkey_xonly_tweak_add(agg_ctx.ctx, &tweaked, &ka.cache, c.tweak))
-        die("taptweak nije valjan");
+    // U --protect načinu tweak se NE smije primijeniti na MuSig2 cache
+    // (internal je NUMS, ne agregat operatora), pa računamo preko točke.
+    bool tweak_ok = false;
+    if (protect) {
+        secp256k1_xonly_pubkey nums_x;
+        if (secp256k1_xonly_pubkey_parse(agg_ctx.ctx, &nums_x, internal))
+            tweak_ok = secp256k1_xonly_pubkey_tweak_add(agg_ctx.ctx, &tweaked, &nums_x, c.tweak) == 1;
+    } else {
+        tweak_ok = secp256k1_musig_pubkey_xonly_tweak_add(agg_ctx.ctx, &tweaked, &ka.cache, c.tweak) == 1;
+    }
+    if (!tweak_ok) die("taptweak nije valjan");
     unsigned char ser33[33];
     size_t ser33len = 33;
     secp256k1_ec_pubkey_serialize(agg_ctx.ctx, ser33, &ser33len, &tweaked, SECP256K1_EC_COMPRESSED);
@@ -213,18 +260,23 @@ static int cmd_commit(int argc, char** argv) {
     std::cout << "Dubina state Merkle stabla          : " << state_tree.depth() << "\n";
     std::cout << "Exit listova u tapscript stablu     : " << leaves << "\n";
     std::cout << "Dubina tapscript stabla             : " << sc_tree.depth() << "\n";
-    std::cout << "CSV delay (blokovi)                 : " << delay << "\n";
+    std::cout << "CSV delay korisnika (blokovi)       : " << delay << "\n";
+    std::cout << "CSV delay operatora (blokovi)       : " << (protect ? std::to_string(op_delay) : "— (nema operatorskog lista)") << "\n";
+    std::cout << "Key-path potrošnja                  : " << (protect ? "NEMOGUĆA (NUMS internal key)" : "moguća (MuSig2 operatora)") << "\n";
     std::cout << "Operatorskih ključeva (MuSig2)      : " << operators.size() << "\n";
     std::cout << "-------------------------------------------------------------------\n";
     std::cout << "State root                          : " << to_hex(state_root, 32) << "\n";
     std::cout << "Tapscript merkle root               : " << to_hex(script_root, 32) << "\n";
-    std::cout << "Internal key (MuSig2 agregat)       : " << to_hex(internal, 32) << "\n";
+    std::cout << "Internal key                        : " << to_hex(internal, 32) << "\n";
     std::cout << "Taptweak t                          : " << to_hex(c.tweak, 32) << "\n";
     std::cout << "Taproot output key                  : " << to_hex(c.output, 32) << "\n";
     std::cout << "Output key parity                   : " << (parity ? "odd (0x03)" : "even (0x02)") << "\n";
     std::cout << "bech32m adresa (" << hrp << ")              : " << addr << "\n";
     std::cout << "-------------------------------------------------------------------\n";
-    std::cout << "descriptor                          : " << descriptor << "\n";
+    if (protect)
+        std::cout << "descriptor                          : (nije prikazan — raw() unutar tr() nije valjan descriptor)\n";
+    else
+        std::cout << "descriptor                          : " << descriptor << "\n";
     std::cout << "===================================================================\n";
 
     std::ofstream out(out_path);
@@ -239,12 +291,15 @@ static int cmd_commit(int argc, char** argv) {
         << "leaves=" << leaves << "\n"
         << "delay=" << delay << "\n"
         << "address=" << addr << "\n"
-        << "descriptor=" << descriptor << "\n"
+        << "descriptor=" << (protect ? std::string("") : descriptor) << "\n"
         << "hrp=" << hrp << "\n"
         << "keys_file=" << keys_path << "\n"
         << "operators_file=" << ops_path << "\n"
         << "n_users=" << users.size() << "\n"
-        << "leaf_mode=" << leaf_mode << "\n";
+        << "leaf_mode=" << leaf_mode << "\n"
+        << "protect=" << (protect ? 1 : 0) << "\n"
+        << "op_delay=" << op_delay << "\n"
+        << "op_agg=" << (protect ? to_hex(op_agg_ser, 32) : std::string("")) << "\n";
     out.close();
     std::cout << "\n[commit] spremljeno u " << out_path << "\n";
     return 0;
@@ -301,6 +356,9 @@ static SpendCtx prepare_spend(int argc, char** argv) {
 static int cmd_spend_keypath(int argc, char** argv) {
     SpendCtx s = prepare_spend(argc, argv);
     const std::string out_path = arg_value(argc, argv, "--out", "keypath.hex");
+    // --fake-keypath: namjerno proizvedi key-path transakciju i u --protect načinu,
+    // da negativni test dokaže da je NUMS internal key stvarno nepotrošiv.
+    const bool fake_keypath = arg_present(argc, argv, "--fake-keypath");
     MusigAggregator agg_ctx;
 
     // operatori
@@ -317,7 +375,6 @@ static int cmd_spend_keypath(int argc, char** argv) {
     // keyagg s taptweakom kroz cache (ista cache kao kod commit-a)
     std::vector<secp256k1_pubkey> pks;
     for (const Signer& sg : operators) pks.push_back(sg.pk);
-    // pravi agregat + taptweak kroz cache
     secp256k1_musig_keyagg_cache cache;
     secp256k1_xonly_pubkey agg_pk;
     {
@@ -330,8 +387,12 @@ static int cmd_spend_keypath(int argc, char** argv) {
             die("taptweak");
         unsigned char ser[33]; size_t l = 33;
         secp256k1_ec_pubkey_serialize(agg_ctx.ctx, ser, &l, &tweaked, SECP256K1_EC_COMPRESSED);
-        if (std::memcmp(ser + 1, s.output_key, 32) != 0)
-            die("agregirani ključ ne odgovara commitmentu (krivi operatorski ključevi?)");
+        if (std::memcmp(ser + 1, s.output_key, 32) != 0) {
+            if (!fake_keypath)
+                die("agregirani ključ ne odgovara commitmentu (krivi operatorski ključevi?)");
+            std::cout << "[fake-keypath] tweakani agregat operatora NE odgovara output keyu "
+                         "— ovo je namjerno (NUMS internal key)\n";
+        }
         if (!secp256k1_xonly_pubkey_from_pubkey(agg_ctx.ctx, &agg_pk, nullptr, &tweaked))
             die("xonly");
     }
@@ -375,7 +436,11 @@ static int cmd_spend_keypath(int argc, char** argv) {
     secp256k1_xonly_pubkey out_xonly;
     if (!secp256k1_xonly_pubkey_parse(agg_ctx.ctx, &out_xonly, s.output_key)) die("xonly parse");
     bool ok = schnorr_verify(agg_ctx.ctx, sig, sighash, out_xonly);
-    if (!ok) die("finalni MuSig2 potpis NE valja protiv output keya — prekidam");
+    if (!ok) {
+        if (!fake_keypath) die("finalni MuSig2 potpis NE valja protiv output keya — prekidam");
+        std::cout << "[fake-keypath] potpis NE valja protiv output keya — očekivano, "
+                     "key-path je u --protect načinu onemogućen\n";
+    }
 
     s.tx.vin[0].witness.clear();
     s.tx.vin[0].witness.push_back(std::vector<unsigned char>(sig, sig + 64));
@@ -411,6 +476,10 @@ static int cmd_spend_scriptpath(int argc, char** argv) {
     const uint32_t delay = (uint32_t)std::stoul(kv_get(s.cm, "delay"));
     const size_t leaves = (size_t)std::stoul(kv_get(s.cm, "leaves"));
 
+    std::map<std::string, std::string>::const_iterator it_protect = s.cm.find("protect");
+    const bool protect = (it_protect != s.cm.end() && it_protect->second == "1");
+    const size_t user_offset = protect ? 1 : 0;
+
     std::vector<std::string> user_lines = read_lines(kv_get(s.cm, "keys_file"));
     std::vector<Signer> users;
     for (const std::string& line : user_lines) {
@@ -420,10 +489,146 @@ static int cmd_spend_scriptpath(int argc, char** argv) {
         if (MusigAggregator::make_signer(agg_ctx.ctx, sk, sg)) users.push_back(sg);
         secure_zero(sk, 32);
     }
-    if (leaf >= leaves || leaf >= users.size()) die("--leaf izvan granica");
+    const size_t n_user_leaves = leaves > user_offset ? leaves - user_offset : 0;
+    if (leaf >= n_user_leaves || leaf >= users.size()) die("--leaf izvan granica");
 
     std::vector<std::vector<unsigned char>> scripts;
-    for (size_t i = 0; i < leaves; i++) {
+    if (protect) {
+        unsigned char op_agg[32];
+        if (!from_hex32(kv_get(s.cm, "op_agg"), op_agg)) die("op_agg nije 32 B");
+        scripts.push_back(csv_checksig_script(op_agg, (uint32_t)std::stoul(kv_get(s.cm, "op_delay"))));
+    }
+    for (size_t i = 0; i < n_user_leaves; i++) {
+        unsigned char ux[32];
+        secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, ux, &users[i].xonly);
+        scripts.push_back(exit_leaf_script(state_root, ux, delay));
+    }
+    TapScriptTree tree;
+    tree.build(scripts);
+    unsigned char root_check[32];
+    tree.merkle_root(root_check);
+    unsigned char claimed[32];
+    if (!from_hex32(kv_get(s.cm, "script_root"), claimed)) die("script_root nije 32 B");
+    if (std::memcmp(root_check, claimed, 32) != 0)
+        die("rekonstruirano skriptno stablo ne odgovara commitmentu");
+
+    const size_t script_index = leaf + user_offset;
+    unsigned char leaf_hash[32];
+    tapleaf_hash(scripts[script_index], leaf_hash);
+
+    // sighash za script path
+    unsigned char sighash[32];
+    sighash_taproot(s.tx, s.spent, 0, 0x00, 1, leaf_hash, sighash);
+
+    unsigned char sig[64];
+    if (!schnorr_sign(agg_ctx.ctx, users[leaf], sighash, sig)) die("potpisivanje nije uspjelo");
+
+    secp256k1_xonly_pubkey uxonly;
+    secp256k1_xonly_pubkey_from_pubkey(agg_ctx.ctx, &uxonly, nullptr, &users[leaf].pk);
+    bool ok = schnorr_verify(agg_ctx.ctx, sig, sighash, uxonly);
+    if (!ok) die("korisnikov potpis ne valja");
+
+    std::vector<unsigned char> path = tree.merkle_path(script_index);
+    TaprootCommitment c;
+    std::memcpy(c.internal, s.commitment.internal, 32);
+    std::vector<unsigned char> cb = control_block(c, s.commitment.output_parity, path);
+    if (arg_present(argc, argv, "--bad-control") && cb.size() > 33) {
+        cb[33] ^= 0x01; // namjerno pokvari prvi hash u putu
+        std::cout << "[negativni test] kontrolni blok je namjerno pokvaren\n";
+    }
+
+    s.tx.vin[0].witness.clear();
+    s.tx.vin[0].witness.push_back(std::vector<unsigned char>(sig, sig + 64));
+    s.tx.vin[0].witness.push_back(scripts[script_index]);
+    s.tx.vin[0].witness.push_back(cb);
+
+    std::cout << "============ SCRIPT-PATH SPEND (unilateralni exit) ============\n";
+    std::cout << "Korisnik (leaf index)        : " << leaf << "\n";
+    std::cout << "nSequence                    : " << s.tx.vin[0].sequence
+              << "  (CSV traži >= " << delay << ")\n";
+    std::cout << "Script (hex)                 : " << to_hex(scripts[script_index]) << "\n";
+    std::cout << "Kontrolni blok               : " << to_hex(cb) << "\n";
+    std::cout << "Dubina dokaza                : " << path.size() / 32 << " ("
+              << cb.size() << " B ukupno)\n";
+    std::cout << "Sighash (BIP-341, ext_flag 1): " << to_hex(sighash, 32) << "\n";
+    std::cout << "Potpis korisnika             : " << to_hex(sig, 64) << "\n";
+    std::cout << "Witness veličina             : " << (64 + 2 + scripts[script_index].size() + 2 + cb.size()) << " B\n";
+    std::cout << "CSV delay istekao?           : "
+              << ((s.tx.vin[0].sequence & 0xffff) >= delay ? "DA" : "NE — node će odbiti")
+              << "\n";
+
+    std::vector<unsigned char> raw = s.tx.serialize(true);
+    std::ofstream out(out_path);
+    if (!out.good()) die("ne mogu pisati " + out_path);
+    out << to_hex(raw) << "\n";
+    out.close();
+    std::cout << "Raw transakcija              : " << out_path << " (" << raw.size() << " B)\n";
+    std::cout << "txid                         : " << s.tx.txid() << "\n";
+    std::cout << "===============================================================\n";
+    return 0;
+}
+
+// ================================================================ spend-op-exit
+// Operatorska putanja: operatorski list u skriptnom stablu, potpisan MuSig2 protokolom.
+// Vremenski je iza korisničkog CSV-a, pa operatori mogu djelovati tek nakon što su
+// korisnici imali priliku izaći.
+static int cmd_spend_op_exit(int argc, char** argv) {
+    SpendCtx s = prepare_spend(argc, argv);
+    const std::string out_path = arg_value(argc, argv, "--out", "opexit.hex");
+    MusigAggregator agg_ctx;
+
+    std::map<std::string, std::string>::const_iterator it_protect = s.cm.find("protect");
+    if (it_protect == s.cm.end() || it_protect->second != "1")
+        die("commitment nije u --protect načinu; operatorski list ne postoji");
+
+    unsigned char op_agg[32];
+    if (!from_hex32(kv_get(s.cm, "op_agg"), op_agg)) die("op_agg nije 32 B");
+    const uint32_t op_delay = (uint32_t)std::stoul(kv_get(s.cm, "op_delay"));
+    const uint32_t delay    = (uint32_t)std::stoul(kv_get(s.cm, "delay"));
+    const size_t leaves     = (size_t)std::stoul(kv_get(s.cm, "leaves"));
+
+    // operatori
+    std::vector<std::string> op_lines = read_lines(kv_get(s.cm, "operators_file"));
+    std::vector<Signer> operators;
+    for (const std::string& line : op_lines) {
+        unsigned char sk[32];
+        if (!from_hex32(line, sk)) die("neispravan operatorski ključ");
+        Signer sg;
+        if (!MusigAggregator::make_signer(agg_ctx.ctx, sk, sg)) die("neispravan operatorski ključ");
+        secure_zero(sk, 32);
+        operators.push_back(sg);
+    }
+
+    // keyagg operatora — BEZ taptweaka, jer je ovo ključ u skriptnom listu
+    secp256k1_musig_keyagg_cache cache;
+    secp256k1_xonly_pubkey agg_pk;
+    {
+        std::vector<const secp256k1_pubkey*> ptrs;
+        for (const Signer& sg : operators) ptrs.push_back(&sg.pk);
+        if (!secp256k1_musig_pubkey_agg(agg_ctx.ctx, &agg_pk, &cache, ptrs.data(), ptrs.size()))
+            die("musig_pubkey_agg");
+        unsigned char ser[32];
+        secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, ser, &agg_pk);
+        if (std::memcmp(ser, op_agg, 32) != 0)
+            die("agregat operatora ne odgovara commitmentu");
+    }
+
+    // rekonstrukcija stabla
+    unsigned char state_root[32];
+    if (!from_hex32(kv_get(s.cm, "state_root"), state_root)) die("state_root nije 32 B");
+    std::vector<std::string> user_lines = read_lines(kv_get(s.cm, "keys_file"));
+    std::vector<Signer> users;
+    for (const std::string& line : user_lines) {
+        unsigned char sk[32];
+        if (!from_hex32(line, sk)) continue;
+        Signer sg;
+        if (MusigAggregator::make_signer(agg_ctx.ctx, sk, sg)) users.push_back(sg);
+        secure_zero(sk, 32);
+    }
+    const size_t n_user_leaves = leaves > 1 ? leaves - 1 : 0;
+    std::vector<std::vector<unsigned char>> scripts;
+    scripts.push_back(csv_checksig_script(op_agg, op_delay));
+    for (size_t i = 0; i < n_user_leaves && i < users.size(); i++) {
         unsigned char ux[32];
         secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, ux, &users[i].xonly);
         scripts.push_back(exit_leaf_script(state_root, ux, delay));
@@ -438,47 +643,47 @@ static int cmd_spend_scriptpath(int argc, char** argv) {
         die("rekonstruirano skriptno stablo ne odgovara commitmentu");
 
     unsigned char leaf_hash[32];
-    tapleaf_hash(scripts[leaf], leaf_hash);
+    tapleaf_hash(scripts[0], leaf_hash);
 
-    // sighash za script path
     unsigned char sighash[32];
     sighash_taproot(s.tx, s.spent, 0, 0x00, 1, leaf_hash, sighash);
 
+    std::vector<secp256k1_pubkey> pks;
+    for (const Signer& sg : operators) pks.push_back(sg.pk);
+    MusigSession sess;
+    musig_round1(agg_ctx.ctx, pks, sighash, cache, sess);
     unsigned char sig[64];
-    if (!schnorr_sign(agg_ctx.ctx, users[leaf], sighash, sig)) die("potpisivanje nije uspjelo");
+    musig_round2(agg_ctx.ctx, operators, cache, sess, sig);
 
-    secp256k1_xonly_pubkey uxonly;
-    secp256k1_xonly_pubkey_from_pubkey(agg_ctx.ctx, &uxonly, nullptr, &users[leaf].pk);
-    bool ok = schnorr_verify(agg_ctx.ctx, sig, sighash, uxonly);
-    if (!ok) die("korisnikov potpis ne valja");
+    unsigned char ser[32];
+    secp256k1_xonly_pubkey_serialize(agg_ctx.ctx, ser, &agg_pk);
+    secp256k1_xonly_pubkey agg_x;
+    if (!secp256k1_xonly_pubkey_parse(agg_ctx.ctx, &agg_x, ser)) die("agg xonly parse");
+    bool ok = schnorr_verify(agg_ctx.ctx, sig, sighash, agg_x);
+    if (!ok) die("MuSig2 potpis operatora ne valja");
 
-    std::vector<unsigned char> path = tree.merkle_path(leaf);
+    std::vector<unsigned char> path = tree.merkle_path(0);
     TaprootCommitment c;
     std::memcpy(c.internal, s.commitment.internal, 32);
     std::vector<unsigned char> cb = control_block(c, s.commitment.output_parity, path);
-    if (arg_present(argc, argv, "--bad-control") && cb.size() > 33) {
-        cb[33] ^= 0x01; // namjerno pokvari prvi hash u putu
-        std::cout << "[negativni test] kontrolni blok je namjerno pokvaren\n";
-    }
 
     s.tx.vin[0].witness.clear();
     s.tx.vin[0].witness.push_back(std::vector<unsigned char>(sig, sig + 64));
-    s.tx.vin[0].witness.push_back(scripts[leaf]);
+    s.tx.vin[0].witness.push_back(scripts[0]);
     s.tx.vin[0].witness.push_back(cb);
 
-    std::cout << "============ SCRIPT-PATH SPEND (unilateralni exit) ============\n";
-    std::cout << "Korisnik (leaf index)        : " << leaf << "\n";
+    std::cout << "============ SCRIPT-PATH SPEND (operatorska putanja) ============\n";
+    std::cout << "Potpisnika (MuSig2)          : " << operators.size() << "\n";
     std::cout << "nSequence                    : " << s.tx.vin[0].sequence
-              << "  (CSV traži >= " << delay << ")\n";
-    std::cout << "Script (hex)                 : " << to_hex(scripts[leaf]) << "\n";
-    std::cout << "Kontrolni blok               : " << to_hex(cb) << "\n";
-    std::cout << "Dubina dokaza                : " << path.size() / 32 << " ("
-              << cb.size() << " B ukupno)\n";
+              << "  (CSV traži >= " << op_delay << ")\n";
+    std::cout << "Korisnički CSV               : " << delay
+              << "  (operatori su " << (op_delay > delay ? "SPORIJI — dobro" : "BRŽI — KRIVO") << ")\n";
+    std::cout << "Script (hex)                 : " << to_hex(scripts[0]) << "\n";
+    std::cout << "Dubina dokaza                : " << path.size() / 32 << " (" << cb.size() << " B)\n";
     std::cout << "Sighash (BIP-341, ext_flag 1): " << to_hex(sighash, 32) << "\n";
-    std::cout << "Potpis korisnika             : " << to_hex(sig, 64) << "\n";
-    std::cout << "Witness veličina             : " << (64 + 2 + scripts[leaf].size() + 2 + cb.size()) << " B\n";
-    std::cout << "CSV delay istekao?           : "
-              << ((s.tx.vin[0].sequence & 0xffff) >= delay ? "DA" : "NE — node će odbiti")
+    std::cout << "MuSig2 potpis                : " << to_hex(sig, 64) << "\n";
+    std::cout << "Operator može potrošiti?     : "
+              << ((s.tx.vin[0].sequence & 0xffff) >= op_delay ? "DA" : "NE — još traje korisnički prozor")
               << "\n";
 
     std::vector<unsigned char> raw = s.tx.serialize(true);
@@ -488,7 +693,7 @@ static int cmd_spend_scriptpath(int argc, char** argv) {
     out.close();
     std::cout << "Raw transakcija              : " << out_path << " (" << raw.size() << " B)\n";
     std::cout << "txid                         : " << s.tx.txid() << "\n";
-    std::cout << "===============================================================\n";
+    std::cout << "=================================================================\n";
     return 0;
 }
 
@@ -570,10 +775,13 @@ int main(int argc, char** argv) {
                   << "  genkeys      --count N --out keys.txt\n"
                   << "  commit       --keys keys.txt --operators operators.txt --delay 10 --leaves 64\n"
                   << "               --hrp bcrt --out commitment.txt\n"
+                  << "               [--protect] [--op-delay 288]   (NUMS internal key + operatorski CSV)\n"
                   << "  spend-keypath --commitment commitment.txt --txid <hex> --vout 0 --amount <sats>\n"
                   << "               --dest-script <hex> --fee <sats> --out keypath.hex\n"
                   << "  spend-scriptpath --commitment commitment.txt --txid <hex> --vout 0 --amount <sats>\n"
                   << "               --dest-script <hex> --fee <sats> --leaf K --sequence D --out scriptpath.hex\n"
+                  << "  spend-op-exit --commitment commitment.txt --txid <hex> --vout 0 --amount <sats>\n"
+                  << "               --dest-script <hex> --fee <sats> --sequence D --out opexit.hex\n"
                   << "  proof        --keys keys.txt --commitment commitment.txt --index 7\n";
         return 0;
     }
@@ -583,6 +791,7 @@ int main(int argc, char** argv) {
         if (cmd == "commit")           return cmd_commit(argc, argv);
         if (cmd == "spend-keypath")    return cmd_spend_keypath(argc, argv);
         if (cmd == "spend-scriptpath") return cmd_spend_scriptpath(argc, argv);
+        if (cmd == "spend-op-exit")    return cmd_spend_op_exit(argc, argv);
         if (cmd == "proof")            return cmd_proof(argc, argv);
     } catch (const std::exception& e) {
         std::cerr << "[FATAL] " << e.what() << "\n";

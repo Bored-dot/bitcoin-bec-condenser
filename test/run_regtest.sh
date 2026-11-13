@@ -7,6 +7,7 @@
 #   2. MuSig2 key-path potpis prolazi konsenzus (stvarna transakcija, rudarena).
 #   3. Korisnikov unilateralni script-path exit prolazi konsenzus (+ CSV delay).
 #   4. Negativni testovi PADAJU kako treba — dakle testovi nisu tautologija.
+#   5. U --protect načinu korisnik ima vremenski prozor prije operatora.
 #
 # Pokretanje:
 #   BITCOIN_BIN=/put/do/bitcoin-27.1/bin SECP_PREFIX=/put/do/secp-inst ./run_regtest.sh
@@ -57,14 +58,14 @@ echo "  blokova: $($CLI getblockcount)   balans: $($CLI getbalance) BTC"
 mine1() { $CLI generatetoaddress 1 "${1:-$MINE}" >/dev/null; }
 
 # nađi vout koji odgovara našem output keyu i vrati "txid vout amount_sats"
-fund() { # $1 = adresa, $2 = BTC
-  local addr="$1" btc="$2" txid vout amt
+fund() { # $1 = adresa, $2 = BTC, $3 = commitment file (default $WORK/commitment.txt)
+  local addr="$1" btc="$2" cmf="${3:-$WORK/commitment.txt}" txid vout amt
   txid=$($CLI sendtoaddress "$addr" "$btc")
   mine1
   read -r vout amt < <($CLI getrawtransaction "$txid" true | python3 -c "
 import sys,json
 t=json.load(sys.stdin)
-key=open('$WORK/commitment.txt').read()
+key=open('$cmf').read()
 key=[l.split('=',1)[1].strip() for l in key.strip().split(chr(10)) if l.startswith('output=')][0]
 for v in t['vout']:
     if key in v['scriptPubKey']['hex']:
@@ -203,6 +204,64 @@ grep -E "Korisnika u stanju|Dubina state|Exit listova|Dubina tapscript|Taproot o
 echo "  vrijeme commita: $(( (T1-T0)/1000000 )) ms"
 grep -q "Korisnika u stanju (listovi)        : 5000" "$WORK/cm5000.log" && ok "5000 korisnika obrađeno" || bad "skala"
 grep -q "^address=bcrt1p" "$WORK/cm5000.txt" && ok "validna bech32m adresa za 5000 korisnika" || bad "adresa"
+
+# ---------------------------------------------------------------- test 9: NUMS + CSV raspored
+hdr "9. ZAŠTITA — NUMS internal key + operatorski CSV iza korisničkog"
+echo "  (bez ovoga operatori mogu potrošiti output odmah i pretrčati korisnički exit)"
+$BEC commit --keys "$WORK/keys64.txt" --operators "$WORK/operators.txt" \
+     --delay 144 --op-delay 288 --leaves 8 --protect --hrp bcrt \
+     --out "$WORK/cm_protect.txt" > "$WORK/cm_protect.log" 2>&1
+grep -E "CSV delay|Key-path potrošnja|Internal key|Taproot output" "$WORK/cm_protect.log" | sed 's/^/  /'
+PADDR=$(grep '^address=' "$WORK/cm_protect.txt" | cut -d= -f2-)
+PINT=$(grep '^internal=' "$WORK/cm_protect.txt" | cut -d= -f2-)
+[ "$PINT" = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0" ] \
+  && ok "internal key je BIP-341 NUMS (key-path nemoguć)" || bad "internal key nije NUMS"
+
+read -r PTXID PVOUT PAMT < <(fund "$PADDR" 0.4 "$WORK/cm_protect.txt")
+echo "  funding: $PTXID vout=$PVOUT ($PAMT sats)"
+PDEST=$($CLI getaddressinfo "$($CLI getnewaddress)" | python3 -c 'import sys,json;print(json.load(sys.stdin)["scriptPubKey"])')
+PDEST2=$($CLI getaddressinfo "$($CLI getnewaddress)" | python3 -c 'import sys,json;print(json.load(sys.stdin)["scriptPubKey"])')
+
+# 9a) key-path mora biti nemoguć
+$BEC spend-keypath --commitment "$WORK/cm_protect.txt" --txid "$PTXID" --vout "$PVOUT" \
+     --amount "$PAMT" --dest-script "$PDEST" --fee 2000 --fake-keypath \
+     --out "$WORK/p_keypath.hex" > "$WORK/p_keypath.log" 2>&1
+expect_reject "$(cat "$WORK/p_keypath.hex")" "key-path (MuSig2 operatora) u --protect načinu"
+
+# 9b) prije delaya ni jedni ni drugi
+$BEC spend-scriptpath --commitment "$WORK/cm_protect.txt" --txid "$PTXID" --vout "$PVOUT" \
+     --amount "$PAMT" --dest-script "$PDEST" --fee 2000 --leaf 0 --sequence 144 \
+     --out "$WORK/p_user.hex" > "$WORK/p_user.log" 2>&1
+expect_reject "$(cat "$WORK/p_user.hex")" "korisnikov exit PRIJE 144 bloka"
+
+$BEC spend-op-exit --commitment "$WORK/cm_protect.txt" --txid "$PTXID" --vout "$PVOUT" \
+     --amount "$PAMT" --dest-script "$PDEST" --fee 2000 --sequence 288 \
+     --out "$WORK/p_op.hex" > "$WORK/p_op.log" 2>&1
+expect_reject "$(cat "$WORK/p_op.hex")" "operatorska potrošnja PRIJE 288 blokova"
+
+# 9c) nakon 144: korisnik SMIJE, operator JOŠ NE
+$CLI generatetoaddress 144 "$MINE" >/dev/null
+echo "  nakon 144 bloka (visina $($CLI getblockcount)):"
+expect_accept "$(cat "$WORK/p_user.hex")" "korisnikov exit NAKON 144 bloka"
+expect_reject "$(cat "$WORK/p_op.hex")" "operator još uvijek blokiran (korisnički prozor traje)"
+
+PU=$($CLI sendrawtransaction "$(cat "$WORK/p_user.hex")" 2>/dev/null)
+mine1
+CONFP=$($CLI gettransaction "$PU" | python3 -c 'import sys,json;print(json.load(sys.stdin)["confirmations"])')
+[ "$CONFP" -ge 1 ] && ok "korisnikov unilateralni exit potvrđen u bloku" || bad "korisnikov exit nije potvrđen"
+
+# 9d) drugi UTXO: operator SMIJE nakon 288
+read -r PTXID2 PVOUT2 PAMT2 < <(fund "$PADDR" 0.4 "$WORK/cm_protect.txt")
+$CLI generatetoaddress 288 "$MINE" >/dev/null
+echo "  nakon 288 blokova (visina $($CLI getblockcount)):"
+$BEC spend-op-exit --commitment "$WORK/cm_protect.txt" --txid "$PTXID2" --vout "$PVOUT2" \
+     --amount "$PAMT2" --dest-script "$PDEST2" --fee 2000 --sequence 288 \
+     --out "$WORK/p_op2.hex" > "$WORK/p_op2.log" 2>&1
+expect_accept "$(cat "$WORK/p_op2.hex")" "operatorska potrošnja NAKON 288 blokova"
+PO=$($CLI sendrawtransaction "$(cat "$WORK/p_op2.hex")" 2>/dev/null)
+mine1
+CONFO=$($CLI gettransaction "$PO" | python3 -c 'import sys,json;print(json.load(sys.stdin)["confirmations"])')
+[ "$CONFO" -ge 1 ] && ok "operatorska potrošnja potvrđena (samo nakon prozora)" || bad "operatorska potrošnja nije potvrđena"
 
 # ---------------------------------------------------------------- sažetak
 hdr "SAŽETAK"
