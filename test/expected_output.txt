@@ -1,0 +1,70 @@
+
+═══ 0. Bitcoin Core regtest
+  verzija: Bitcoin Core version v27.1.0
+  blokova: 150   balans: 2500.00000000 BTC
+  ✅ PASS  regtest node radi
+
+═══ 1. Ključevi
+  ✅ PASS  5000 korisničkih + 3 operatorska ključa
+
+═══ 1. BIP-341 adresa vs Bitcoin Core (descriptor oracle)
+  Bitcoin Core : bcrt1prm93fzwc4z9tm2uecfenruph80evwzet4cu4fg5mcvdrs9k0rxzsgk9q8w
+  naš program  : bcrt1prm93fzwc4z9tm2uecfenruph80evwzet4cu4fg5mcvdrs9k0rxzsgk9q8w
+  ✅ PASS  taproot adresa se poklapa s Bitcoin Core
+
+═══ 2. Key-path spend — MuSig2 (BIP-327) preko BIP-341 sighasha
+  Exit listova u tapscript stablu     : 64
+  Dubina tapscript stabla             : 6
+  State root                          : 1547b06ac311a13dea4936a14e429c1ec2444ac757bcf5fc3579f457bdc016f5
+  Internal key (MuSig2 agregat)       : 6ea87f9236a4540c5a12571d944b585bab91f4a3eddf300136f56b01dfe95e14
+  Taproot output key                  : eded372ee4f449603c260e81517f518cbb910a8dfeb1915d39038f73ccd55616
+  bech32m adresa (bcrt)              : bcrt1pahknwthy73ykq0pxp6q4zl633jaezz5dl6cezhfeqw8h8nx42ctq4uqzt7
+  funding: f1e84f7b82a5154ff8d29d4e4151424f81cb4523a000f0f0f859cc0d857caa05 vout=0 (100000000 sats)
+  Potpisnika (MuSig2)          : 3
+  Witness veličina             : 64 B (1 element)
+  Verifikacija vs output key   : OK
+  ✅ PASS  MuSig2 key-path — node prihvaća
+  ✅ PASS  key-path transakcija potvrđena u bloku (1 potvrda)
+  vsize: 99 vB   (witness = 64 B neovisno o broju korisnika)
+
+═══ 3. Script-path — unilateralni exit korisnika (+ CSV delay)
+  funding: 9e76f88c253d2602eef867ed5ba6d65e8565c6b55d7cba428aafe305592f0486 vout=1 (50000000 sats)
+  Korisnik (leaf index)        : 2
+  nSequence                    : 10  (CSV traži >= 10)
+  Dubina dokaza                : 6 (225 B ukupno)
+  Witness veličina             : 364 B
+  CSV delay istekao?           : DA
+  ✅ PASS  script-path exit — node prihvaća
+  ✅ PASS  script-path transakcija potvrđena u bloku
+
+═══ 4. NEGATIVNI test — potpis samo jednim ključem (bug iz originalne verzije)
+  Verifikacija vs output key   : FAIL — očekivano
+  ✅ PASS  potpis jednim ključem umjesto MuSig2 — node odbija: mandatory-script-verify-flag-failed (Invalid Schnorr signature)
+
+═══ 5. NEGATIVNI test — exit PRIJE isteka CSV delaya
+  ✅ PASS  exit prije isteka CSV delaya — node odbija: mandatory-script-verify-flag-failed (Locktime requirement not satisfied)
+
+═══ 6. NEGATIVNI test — pokvaren kontrolni blok
+  ✅ PASS  pokvaren kontrolni blok — node odbija: mandatory-script-verify-flag-failed (Witness program hash mismatch)
+
+═══ 7. Inclusion proof korisnika u state root
+  Korisnik (index)             : 7
+  Dubina dokaza                : 6 (192 B)
+  Verifikacija                 : OK
+  ✅ PASS  Merkle inclusion proof valjan
+  proof za index 7 i 8 daju isti root: DA (dobro)
+
+═══ 8. Skala — 5000 korisnika, 4096 exit listova
+  Korisnika u stanju (listovi)        : 5000
+  Dubina state Merkle stabla          : 13
+  Exit listova u tapscript stablu     : 4096
+  Dubina tapscript stabla             : 12
+  Taproot output key                  : e252f1eaad21c8337d38832a3a01dcbf0874d31aa366fc4171412db0ca3e7792
+  bech32m adresa (bcrt)              : bcrt1puff0r64dy8yrxlfcsv4r5qwuhuy8f5c65dn0cst3gykmpj37w7fqck2tss
+  vrijeme commita: 82 ms
+  ✅ PASS  5000 korisnika obrađeno
+  ✅ PASS  validna bech32m adresa za 5000 korisnika
+
+═══ SAŽETAK
+  PASS: 13   FAIL: 0
+  🎉 SVI TESTOVI PROŠLI — implementacija je potvrđena na Bitcoin Core konsenzusu.
