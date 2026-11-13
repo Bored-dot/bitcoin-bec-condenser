@@ -1,470 +1,197 @@
-# Bitcoin BEC Condenser — stvarna implementacija
+# Bitcoin BEC Condenser — VTXO settlement na Bitcoinu
 
 MuSig2 (BIP-327) + Taproot (BIP-341) settlement za L2 stanje, **testirano na Bitcoin Core konsenzusu**.
 
-Ovo nije samo benchmark agregacije ključeva. Ovo je program koji:
-- izgradi stvarni Taproot output koji komitira cijelo L2 stanje,
-- potpiše ga **pravim MuSig2 protokolom u dvije runde**,
-- i omogući korisniku **unilateralni exit koji stvarno drži** — jer je operatorima
-  key-path matematički onemogućen, a njihov CSV stroži od korisničkog,
-- a lažni izlaz se **oduzima javnim dokazom** unutar challenge prozora,
-- ima **BitVM jezgru** u kojoj prover fizički ne može lagati o bitu bez gubitka bonda,
-- i ima **BitVM2 matricu skriptova**: 8-bitni zbrajač kao 297 listova, gdje se svaki
-  gate provjerava zasebno i prijevara se dokazuje na lancu.
+Ovaj projekt je prošao kroz tri arhitekture i README to ne skriva:
 
-Sve gore navedeno potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu — ne ispisom u terminalu.
+1. **Simulacija** (originalna verzija) — lažni hash, potpis jednim ključem, "covenant verified"
+   koji ništa nije provjeravao. Uklonjeno.
+2. **Jedan UTXO + exit listovi** — pravi MuSig2 i Taproot, ali sa strukturnim problemom:
+   skripta ne vidi iznos, pa korisnik koji izađe podigne cijeli UTXO. Dokumentirano dolje
+   kao *Zašto je model promijenjen*.
+3. **VTXO — jedan output po korisniku** — trenutna arhitektura. Iznos nije tvrdnja u skripti,
+   nego činjenica na lancu.
+
+Sve u ovom repou potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu — ne ispisom u terminalu.
 
 ---
 
-## Rezultat testa
+## Rezultat testova
 
 ```
 ════════════════════════════════════════════════════════════════
- 0. Bitcoin Core regtest            Bitcoin Core v27.1.0
- 1. BIP-341 adresa vs Bitcoin Core  ✅ adresa identična (descriptor oracle)
- 2. Key-path spend — MuSig2         ✅ prihvaćen + potvrđen u bloku (99 vB)
- 3. Script-path — unilateralni exit ✅ prihvaćen + potvrđen u bloku (364 B witness)
- 4. NEGATIVNI: potpis 1 ključem     ✅ odbijen — "Invalid Schnorr signature"
- 5. NEGATIVNI: exit prije CSV       ✅ odbijen — "Locktime requirement not satisfied"
- 6. NEGATIVNI: pokvaren control blk ✅ odbijen — "Witness program hash mismatch"
- 7. Inclusion proof                 ✅ valjan (dubina 6, 192 B)
- 8. Skala: 5000 korisnika           ✅ 4096 exit listova, dubina 12
- 9. ZAŠTITA (NUMS + CSV)            ✅ 8 provjera — exita ne može pretrčati operator
-    · key-path (MuSig2 operatora)  ✅ odbijen — Invalid Schnorr signature
-    · korisnik prije 144 bloka     ✅ odbijen — non-BIP68-final
-    · operator prije 288 blokova   ✅ odbijen — non-BIP68-final
-    · korisnik nakon 144 bloka     ✅ prihvaćen + potvrđen u bloku
-    · operator još na 144 bloka    ✅ odbijen (korisnički prozor traje)
-    · operator nakon 288 blokova   ✅ prihvaćen + potvrđen u bloku
-10. CHALLENGE/RESPONSE              ✅ 6 provjera — lažni izlaz se oduzima
-    · tvrdnja prije prozora        ✅ odbijen — non-BIP68-final
-    · osporavanje, pogrešan dokaz  ✅ odbijen — OP_EQUALVERIFY failed
-    · osporavanje, ispravan dokaz  ✅ prihvaćen + potvrđen u bloku
-    · tvrdnja nakon prozora        ✅ prihvaćen + potvrđen u bloku
+  test/run_regtest.sh   MuSig2 / Taproot / exiti / challenge      28/28
+  test/run_bitvm.sh     BitVM jezgra (bit-commitment bond)         11/11
+  test/run_matrix.sh    BitVM2 matrica skriptova (8-bit zbrajač)   15/15
+  test/run_vtxo.sh      VTXO settlement                            18/18
 ────────────────────────────────────────────────────────────────
-   test/run_regtest.sh:   PASS: 28   FAIL: 0
-════════════════════════════════════════════════════════════════
-
-════════════════════════════════════════════════════════════════
- 11. BITVM JEZGRO                  (test/run_bitvm.sh)
- 1. Bond                           ✅ 8 penalty listova + timeout, h0/h1 u skriptu
- 2. Kazna s OBA preimagea          ✅ prihvaćen + potvrđen — ekvivokacija dokazana
- 3. NEGATIVNI: pogrešan preimage   ✅ odbijen — OP_EQUALVERIFY
- 4. NEGATIVNI: samo jedan preimage ✅ odbijen — OP_EQUALVERIFY
- 5. NEGATIVNI: pogrešan potpisnik  ✅ odbijen — Invalid Schnorr signature
- 6. NEGATIVNI: timeout prije CSV   ✅ odbijen — non-BIP68-final
- 7. Timeout nakon CSV-a            ✅ prihvaćen + potvrđen
-────────────────────────────────────────────────────────────────
-   test/run_bitvm.sh:     PASS: 11   FAIL: 0
-════════════════════════════════════════════════════════════════
-
-════════════════════════════════════════════════════════════════
- 12. BITVM2 MATRICA SKRIPTOVA     (test/run_matrix.sh)
- 1. Matrica                         ✅ 37 gatea × 8 + timeout = 297 listova, dubina 9
- 2. Prover: konzistentan gate      ✅ prihvaćen + potvrđen
- 3. Zadnji gate (carry out)         ✅ prihvaćen + potvrđen (indeks 291)
- 4. Osporavatelj: nekonzistentan   ✅ prihvaćen — bond preuzet, potvrđen
- 5. NEGATIVNI: pogrešan potpisnik   ✅ odbijen — Invalid Schnorr signature
- 6. NEGATIVNI: obrnut potpisnik     ✅ odbijen — Invalid Schnorr signature
- 7. NEGATIVNI: pogrešan preimage    ✅ odbijen — OP_EQUALVERIFY
- 8. NEGATIVNI: timeout prije CSV    ✅ odbijen — non-BIP68-final
- 9. Timeout nakon CSV-a             ✅ prihvaćen + potvrđen
-────────────────────────────────────────────────────────────────
-   test/run_matrix.sh:    PASS: 15   FAIL: 0
+  UKUPNO: 72 provjere, 14 negativnih
 ════════════════════════════════════════════════════════════════
 ```
 
 Negativni testovi su namjerno tu: test koji uvijek prolazi ne dokazuje ništa.
-Testovi 4–6, sekcije 9 i 10 te negativni testovi BitVM suitea padaju s **točno onim
-konsenzus greškama koje Bitcoin Core stvarno vraća**.
+Svaki pad nosi **točnu konsenzus grešku koju Bitcoin Core stvarno vraća**.
+
+Detaljni rezultati: `test/expected_output*.txt`.
 
 ---
 
-## Arhitektura
+## Zašto je model promijenjen
 
-```
-   L2 stanje: 5000 korisnika (xonly ključ + balans)
-        │
-        ├── Merkle stablo stanja ──────────► state root  (13 razina, dokaz 416 B)
-        │
-        ├── tapscript stablo (4096 listova)
-        │      list 0     :  <288> CSV DROP <op_agg> CHECKSIG        ← operatori
-        │      list 1..N  :  <state_root> DROP <144> CSV DROP <user> ← korisnici
-        │      └─ state root je U SVAKOM LISTU → output key obavezno komitira stanje
-        │
-        └── internal key = BIP-341 NUMS točka (key-path NEMOGUĆ)
-                                                          │
-                              BIP-341 taptweak:  t = H("TapTweak", internal ‖ script_root)
-                                                          │
-                                                Taproot output key (32 B)
-                                                          │
-                                            bech32m adresa (bcrt1p…)
+Ovo je najvažnija sekcija u dokumentu i zato je na početku.
 
-  TROŠENJE:
-    script-path (korisnik, CSV 144)  →  potpis + kontrolni blok   [unilateralni exit]
-    script-path (operatori, CSV 288) →  MuSig2 dvije runde         [kooperativni settlement]
-    key-path                        →  NEMOGUĆ (NUMS internal key)
-```
+**Skripta ne vidi iznose.** Tapscript izvršava uvjete nad podacima koje mu witness preda;
+nema pristup outputima transakcije koja ga troši. Zato nijedan skript ne može provjeriti
+*"odgovara li ovaj izlaz mom balansu"*.
 
-**Zašto ovo radi, a MuSig2-sam-za-5000-korisnika ne bi:** MuSig2 se koristi za **3 operatora**
-(mali, uvijek dostupan skup). 5000 korisnika je u **skriptnom stablu** i Merkle dokazu — svaki
-korisnik izlazi sam, bez rundi komunikacije i bez mogućnosti da ga bilo ko blokira.
+Iz toga slijedi da model s **jednim zajedničkim UTXO-om** ima posljedicu koju treba izgovoriti:
+korisnik koji izađe podigne **cijeli UTXO**. Pošten izlaz i prijevara su u tom trenutku
+ekonomski identični — i jedan i drugi unište tuđa sredstva.
+
+Challenge/response iz PR #3 to čini *kažnjivim*, ali ne i *nemogućim*: digest je u skriptu,
+ali skript ga samo `OP_DROP`-a. Lanac provjerava *"osporavatelj zna ista 48 bajta"*, ne
+*"iznos je točan"*. To sam u PR #2 trebao reći jasnije.
+
+**Rješenje ne treba covenant.** Ako se odustane od zajedničkog UTXO-a, problem iznosa
+prestaje postojati — jer se iznos ne provjerava, nego **upisuje**. To je VTXO model.
 
 ---
 
-## Instalacija
-
-```bash
-# 1. libsecp256k1 iz izvora (OBAVEZNO — distribucijski paket nema musig modul)
-git clone --depth 1 https://github.com/bitcoin-core/secp256k1.git
-cd secp256k1
-./autogen.sh
-./configure --enable-module-musig --enable-experimental \
-            --enable-module-extrakeys --enable-module-schnorrsig \
-            --prefix=$PWD/../secp-inst
-make -j"$(nproc)" && make install
-cd ..
-
-# 2. programi (bec + bec-bitvm + bec-matrix)
-bash test/build.sh
-```
-
-Bitcoin Core za test: [bitcoincore.org/bin](https://bitcoincore.org/bin/bitcoin-core-27.1/)
-(preuzeti `bitcoin-27.1-x86_64-linux-gnu.tar.gz`, raspakirati).
-
----
-
-## Korištenje
-
-```bash
-export LD_LIBRARY_PATH=../secp-inst/lib
-
-# 1) ključevi
-./bec genkeys --count 5000 --out keys.txt
-./bec genkeys --count 3    --out operators.txt
-
-# 2) commitment — --protect je PREPORUČENI način:
-#    NUMS internal key + operatorski list s CSV-om 288
-./bec commit --keys keys.txt --operators operators.txt \
-             --delay 144 --op-delay 288 --protect \
-             --leaves 4096 --hrp bcrt --out commitment.txt
-
-#    bez --protect: key-path ostaje moguć (99 vB kooperativno), ali operatori
-#    mogu pretrčati korisnički exit — koristi samo za mjerenje veličine
-
-# 3) unilateralni exit korisnika (bez operatora, nakon CSV 144)
-./bec spend-scriptpath --commitment commitment.txt \
-             --txid <funding-txid> --vout <n> --amount <sats> \
-             --dest-script <hex> --fee 2000 \
-             --leaf 2 --sequence 144 --out scriptpath.hex
-
-# 4) kooperativni settlement (MuSig2 preko skriptnog lista, tek nakon CSV 288)
-./bec spend-op-exit --commitment commitment.txt \
-             --txid <funding-txid> --vout <n> --amount <sats> \
-             --dest-script <hex> --fee 2000 --sequence 288 --out opexit.hex
-
-# 5) challenge/response (lažni izlaz se oduzima)
-./bec commit --keys keys.txt --operators operators.txt \
-             --delay 144 --leaves 4096 --protect \
-             --challenge --challenge-window 96 \
-             --challenger-key <64 hex> --hrp bcrt --out committed.txt
-
-#    korisnik pokušava podići nakon prozora
-./bec spend-scriptpath --commitment committed.txt --txid <txid> --vout <n> \
-             --amount <sats> --dest-script <hex> --fee 2000 \
-             --leaf 2 --sequence 96 --out claim.hex
-
-#    bilo tko s dokazom oduzima izlaz (radi odmah, ne čeka prozor)
-./bec spend-challenge --commitment committed.txt --txid <txid> --vout <n> \
-             --amount <sats> --dest-script <hex> --fee 2000 --leaf 2 \
-             --challenger-key <hex> --sequence 1 --out challenge.hex
-
-# 6) BitVM jezgra: bond + kazna za ekvivokaciju
-./bec-bitvm bond --bits 8 --csv 96 \
-             --prover-key <hex> --challenger-key <hex> --hrp bcrt --out bond.txt
-
-#    kazna: potrošivo SAMO s oba preimagea istog bita
-./bec-bitvm penalty --bond bond.txt --index 3 --txid <txid> --vout <n> \
-             --amount <sats> --dest-script <hex> --fee 2000 --sequence 1 \
-             --challenger-key <hex> --out penalty.hex
-
-#    prover vraća bond nakon CSV-a
-./bec-bitvm timeout --bond bond.txt --txid <txid> --vout <n> \
-             --amount <sats> --dest-script <hex> --fee 2000 --sequence 96 \
-             --prover-key <hex> --out timeout.hex
-
-# 7) BitVM2 matrica skriptova — 8-bitni zbrajač
-./bec-matrix build --bits 8 --csv 96 \
-             --prover-key <hex> --challenger-key <hex> --hrp bcrt --out matrix.txt
-
-#    prover dokazuje da je gate konzistentan
-./bec-matrix proof-ok --matrix matrix.txt --gate 0 --a 200 --b 100 \
-             --txid <txid> --vout <n> --amount <sats> --dest-script <hex> \
-             --fee 2000 --sequence 1 --prover-key <hex> --out ok.hex
-
-#    osporavatelj dokazuje da JEST nekonzistentan (i uzima bond)
-./bec-matrix proof-bad --matrix matrix.txt --gate 20 --a 200 --b 100 \
-             --txid <txid> --vout <n> --amount <sats> --dest-script <hex> \
-             --fee 2000 --sequence 1 --challenger-key <hex> --out bad.hex
-
-# 8) dokaz da je korisnik u stanju
-./bec proof --keys keys.txt --commitment commitment.txt --index 7
-```
-
-`--hrp`: `bc` (mainnet), `tb` (testnet), `bcrt` (regtest).
-
----
-
-## Test na Bitcoin Core
-
-```bash
-export BITCOIN_BIN=/put/do/bitcoin-27.1/bin
-export SECP_PREFIX=/put/do/secp-inst
-
-bash test/run_regtest.sh   # 28 provjera: MuSig2, Taproot, exiti, challenge
-bash test/run_bitvm.sh     # 11 provjera: BitVM bond, ekvivokacija, timeout
-bash test/run_matrix.sh    # 15 provjera: BitVM2 matrica, 8-bitni zbrajač
-```
-
-Svaka skripta diže **vlastiti** regtest node (`.regtest-data/`, `.regtest-bitvm/`,
-`.regtest-matrix/`), rudari svoje blokove i gasi ga na kraju. Ne dira postojeći node i
-ne dijele stanje. Ukupno 54 provjere, od kojih 14 negativnih.
-
----
-
-## Zaštita unilateralnog exita (NUMS + CSV)
-
-Bez ovoga exit ne vrijedi ništa: output je jedan UTXO s dvije putanje, a operatori su
-mogli potrošiti **key-path** odmah — pa su u utrci za isti UTXO trivijalno pobjeđivali
-korisnika koji čeka CSV. Exit je tada bio moguć samo ako su operatori pristojni, što je
-upravo ono što exit treba pokrivati.
-
-Rješenje (`--protect`):
+## VTXO — jedan output po korisniku
 
 ```
-   internal key  = 50929b74…803ac0   ← BIP-341 NUMS točka, diskretni log NEPOZNAT
-                                       ⇒ key-path je matematički nemoguć
-                                       ⇒ sve ide preko skriptnog stabla
-
-   tapscript stablo:
-     list 0        :  <288> CSV DROP <op_agg> CHECKSIG          ← operatori, CSV 288
-     list 1..N     :  <state_root> DROP <144> CSV DROP <user> CHECKSIG   ← korisnici, CSV 144
+  funding tx  (operator plaća)
+       │
+       ├── grupni output 0  = zbroj balansa grupe 0    ┐
+       ├── grupni output 1  = zbroj balansa grupe 1    │  ključ: MuSig2(operator + svi u grupi)
+       └── grupni output 2  = zbroj balansa grupe 2    ┘  → nitko sam ne može potrošiti
+                   │
+                   │  grupna tx (pre-potpisana od SVIm u grupi + operator)
+                   ▼
+       ┌───────────┬───────────┬───────────┬───────────┐
+    VTXO 0      VTXO 1      VTXO 2      VTXO 3        svaki = TOČNO svoj balans
+       │
+       └─ internal key = MuSig2(operator, korisnik)
+          leaf         = <delay> CSV DROP <korisnik> CHECKSIG
 ```
 
-Korisnički CSV je **stroži** (manji) od operatorskog, pa korisnik uvijek ima prozor od
-144 bloka u kojem **samo on** može potrošiti output. Provjereno na nodeu:
+Dvije putanje po VTXO-u:
 
-| visina | korisnik (CSV 144) | operator (CSV 288) |
+| putanja | što treba | kad |
 |---|---|---|
-| prije 144 | odbijen `non-BIP68-final` | odbijen `non-BIP68-final` |
-| nakon 144 | **prihvaćen, potvrđen** | odbijen — prozor još traje |
-| nakon 288 | prihvaćen | **prihvaćen, potvrđen** |
+| **key-path** | MuSig2(operator, korisnik) — oba potpisa | kooperativno, bilo kad |
+| **script-path** | samo korisnikov potpis, nakon CSV-a | unilateralni exit, bez operatora |
 
-Cijena: kooperativna potrošnja seli s key-path na script-path (~+60 vB). I dalje O(1),
-ali nije više 99 vB. To je namjerna zamjena — bez nje exit nije garancija.
+**Zašto je ovo sigurno bez ijedne pretpostavke o promatraču:**
 
-**Što ovime NIJE riješeno:** bez covenanta se iznos izlaza ne može ograničiti, pa korisnik
-koji izađe podiže **cijeli UTXO**, ne samo svoj balans. Zaštita je time "prvi koji izađe
-uzima sve", a ne per-korisničko poravnanje.
+- Operator **ne može** uzeti VTXO — key-path traži i korisnikov potpis.
+- Korisnik **ne može** uzeti tuđi VTXO — drugi ključ, drugi output.
+- Korisnik **ne može** uzeti više od svog balansa — toliki output je jedini koji postoji.
+- Nema watchtowera za sigurnost VTXO-a: korisnik izlazi sam, bez da ikoga čeka.
+
+### Zašto grupna tx ne može biti lažna
+
+Ovo je mehanizam koji zamjenjuje covenant, i provjeren je na lancu.
+
+Grupni output traži **MuSig2(operator + svi u grupi)**. Grupnu tx potpisuju svi.
+Parcijalni MuSig2 potpis je vezan na **jedan** sighash — ne može se prenijeti na drugu
+transakciju. Dakle: tko god odbije potpisati izmijenjenu tx, ta tx nikad neće imati valjan
+potpis, jer drugi potpis matematički ne postoji.
+
+Provjereno (`test/run_vtxo.sh`, sekcija 7):
+
+```
+Napadač (korisnik 0) traži  : 7000 sats (umjesto 5000)
+Žrtva   (korisnik 3) gubi   : 2000 sats
+Zbroj outputa               : 20000 sats (nepromijenjen)
+Potpis                      : pošteni 64 B, jer potpis za ovu tx NE POSTOJI
+→ node odbija: Invalid Schnorr signature
+```
+
+I kontrolni test u istom trenutku: **poštena** grupna tx prolazi. Pad nije artefakt testa.
+
+### Cijena
+
+Nema covenanta, ali nema ni besplatnog ručka. Poštena cijena je:
+
+| što | posljedica |
+|---|---|
+| svi u grupi moraju potpisati grupnu tx | jednokratno, prije nego grupni output postoji |
+| MuSig2 skup ≤ fanout + 1 | ne treba 5000-potpisni skup, ali treba 65-potpisni |
+| više outputa na lancu | ~55 B po korisniku (vidi `bec-vtxo scale`) |
+
+Skala za 5000 korisnika, fanout 64:
+
+```
+Grupa                        : 79
+On-chain tx-ova              : 80   (1 funding + 79 grupnih)
+Najveća grupa                : 64 korisnika (65 potpisnika)
+Ukupno on-chain (procjena)   : 273 533 B
+Po korisniku                 : 54.7 B
+```
+
+**Nema ijednog MuSig2 skupa veličine 5000.** To je ključna razlika u odnosu na ideju
+"svih 5000 u jedan agregat", gdje jedan offline korisnik zamrzne sva sredstva.
 
 ---
 
-## Challenge/response — lažni izlaz se oduzima
+## Stari model — jedan UTXO, 4096 exit listova
 
-`--protect` rješava *tko smije prvi*. Nije rješavao *koliko smije uzeti*: korisnik
-koji izađe podigne **cijeli UTXO**, ne samo svoj balans, i nitko ga ne može kazniti.
-Skripta to ne može provjeriti bez covenanta.
-
-Challenge/response to rješava **ekonomski**, na isti način na koji rade optimistic rollupi:
+Ostaje u kodu (`bec commit`, `bec spend-scriptpath`, `--protect`, `--challenge`) jer je
+kriptografski ispravan i koristan kao referenca. Ali **nije put za L2** i to je sada
+eksplicitno, a ne u fusnoti.
 
 ```
-  1. CLAIM      korisnik potroši UTXO i veže se na claim_digest (iznos + index + state root)
-                → digest je UBAČEN U SKRIPT, pa se tvrdnja ne može promijeniti nakon uplate
-  2. WINDOW     96 blokova u kojima korisnik NE MOŽE podići sredstva (OP_CSV)
-  3. CHALLENGE  svako s valjanim dokazom preuzima izlaz:
-                  OP_SHA256 <claim_digest> OP_EQUALVERIFY ... <challenger> CHECKSIG
-                → dokaz mora hashirati na digest; bez toga skript pada
-  4. SETTLE     ako prozor prođe bez osporavanja, korisnik preuzima izlaz
+  tapscript stablo (4096 listova)
+     list 0    :  <288> CSV DROP <op_agg> CHECKSIG        ← operatori, CSV 288
+     list 1..N :  <state_root> DROP <144> CSV DROP <user> ← korisnici, CSV 144
+  internal key = BIP-341 NUMS (key-path nemoguć)
 ```
 
-Provjereno na nodeu:
+Što u njemu **stvarno radi** i dokazano je na lancu:
 
-| scenarij | rezultat |
-|---|---|
-| tvrdnja prije 96. bloka | odbijen `non-BIP68-final` |
-| osporavanje s pogrešnim dokazom | odbijen `OP_EQUALVERIFY failed` |
-| osporavanje s ispravnim dokazom | **prihvaćen, izlaz oduzet, potvrđen** |
-| tvrdnja nakon prozora (neosporena) | **prihvaćen, potvrđen** |
+- BIP-341 adresa identična Bitcoin Core deskriptoru.
+- MuSig2 key-path: 99 vB, 64-bajtni potpis, potvrđeno u bloku.
+- NUMS + CSV zaštita: operator **ne može** pretrčati korisnika (CSV 288 > 144), potvrđeno
+  na visinama prije/poslije 144 i 288.
+- Challenge/response: lažna tvrdnja je kažnjiva i dokaziva na lancu.
 
-**Što je time stvarno zatvoreno:** lažna tvrdnja više nije besplatna. Vezana je na
-nepromjenjiv digest, mora preživjeti javni prozor, i svako može posegnuti za izlazom
-otkrivanjem dokaza — a otkrivanje dokaza je na lancu pa je svaki takav potez
-neporeciv i provjerljiv nakon činjenice.
+Što u njemu **ne radi**:
 
-**Što ostaje pretpostavka (i piše u kodu, `src/challenge.hpp`):**
-- **Da je tvrdnja lažna provjerava se izvan lanca.** Na lancu se dokazuje samo da je
-  osporavatelj otkrio točno onaj dokaz na koji se korisnik vezao.
-- **Netko mora gledati.** Ako nitko ne ospori u prozoru, lažna tvrdnja prolazi.
-- **Utrka je moguća.** Challenge i claim su konkurentne transakcije na istom UTXO-u.
+- Iznos. Skripta ga ne vidi, pa korisnik podigne cijeli UTXO.
+- Tuđa sredstva. Jedan UTXO znači da svaki exit dira sve ostale.
+
+Zato je VTXO model zamjena, a ne dodatak.
 
 ---
 
-## BitVM jezgra — bit-commitment bond
+## BitVM — dva sloja, oba iskrena o sebi
 
-Challenge/response iz prethodne sekcije ima jednu pretpostavku: *da je tvrdnja lažna
-provjerava se izvan lanca*. BitVM ide korak dalje — prover **fizički ne može** lagati
-o pojedinom bitu svog međurezultata, jer bi ga to koštalo bonda.
+### BitVM jezgra (`src/bitvm.hpp`, `bec-bitvm`)
 
-Ovdje je implementirana ta jezgra, i provjerena na nodeu:
-
-```
-  za svaki indeks bita i postoje dva commitmenta:
-      h0(i) = SHA256( SHA256( 0x00 || 0x00 || i_le32 || salt ) )
-      h1(i) = SHA256( SHA256( 0x00 || 0x01 || i_le32 || salt ) )
-
-  penalty list za indeks i:
-      OP_SHA256 <h1(i)> OP_EQUALVERIFY
-      OP_SHA256 <h0(i)> OP_EQUALVERIFY
-      <challenger> OP_CHECKSIG
-
-  → potrošiv SAMO s witnessom [sig, preimage(0,i), preimage(1,i)]
-```
-
-To je važna razlika u odnosu na "osporavatelj tvrdi da je laž". Ekvivokacija nije
-tvrdnja koju netko mora dokazati — ona je **uvjet bez kojeg skript ne prolazi**.
-Tko otvori oba bita istog indeksa, predao je bond; tko ne otvori, ne može ga ni
-dotaknuti. Provjereno:
-
-| scenarij | rezultat |
-|---|---|
-| kazna s oba preimagea | **prihvaćen, bond preuzet, potvrđen** |
-| kazna s pogrešnim preimageom | odbijen `OP_EQUALVERIFY failed` |
-| kazna sa samo jednim preimageom | odbijen `OP_EQUALVERIFY failed` |
-| kazna s ispravnim dokazom, pogrešan potpisnik | odbijen `Invalid Schnorr signature` |
-| proverov timeout prije CSV-a | odbijen `non-BIP68-final` |
-| proverov timeout nakon CSV-a | **prihvaćen, potvrđen** |
-
-Internal key je NUMS, pa je key-path nemoguć i sve ide preko skriptnog stabla —
-ista konstrukcija kao u `--protect`.
-
-### Što je ovo, a što nije
-
-**Ovo je BitVM primitiv, ne BitVM2 protokol.** Razlika je bitna i ne želim je zamutiti:
-
-| BitVM2 ima | Ovdje |
-|---|---|
-| garbled circuits / matrice skriptova koje provjeravaju cijeli izraz | ✗ — provjerava se **jedan bit**, ne izraz |
-| bisection protokol preko razina poziva | ✗ — jedan sloj, indeks bira osporavatelj |
-| na-lancu provjeru da je otkriveni bit **ispravan za tvrdnju** | ✗ — na lancu se dokazuje samo da su otkrivena **dva proturječna** bita |
-| commit na cijeli program i njegove međurezultate | ✗ — commit na N bitova koje prover sam bira |
-
-Dakle: ono što je stvarno zatvoreno je **ekvivokacija**. Prover koji za isti bit
-tvrdi i 0 i 1 gubi bond, i to je dokazivo na lancu bez ikakve pretpostavke o
-promatraču. Ono što nije zatvoreno je da je *pojedinačni* otkriveni bit lažan za
-tvrdnju — to bi tražilo garbled circuits, što je red veličine veći posao.
-
-Ime je važno. Nazvati ovo "BitVM2" bilo bi isto kao tvrditi da je `sha256_double`
-SHA-256 — greška zbog koje je ovaj projekt i počeo.
-
----
-
-## BitVM2 matrica skriptova — 8-bitni zbrajač
-
-BitVM jezgra iz prethodne sekcije dokazuje samo *ekvivokaciju*: "prover je isti bit
-otvorio dvaput". To nije provjera **izračuna**. Matrica to mijenja.
-
-Ideja: svaki logički gate ima dvije ulazne žice i jednu izlaznu, dakle 8 kombinacija.
-Za XOR/AND/OR je točno **4 kombinacije konzistentne** s funkcijom gatea, a **4 nisu**.
-Za svaku od 8 kombinacija postoji vlastiti list, i svaki list potpisuje onaj kome ta
-kombinacija ide u prilog:
+Bit-commitment bond: za svaki indeks bita postoje `h0(i)` i `h1(i)`, a penalty list prihvaća
+**samo oba preimagea**:
 
 ```
-  konzistentna kombinacija   → list potpisuje PROVER        (dokaz da je gate dobar)
-  nekonzistentna kombinacija → list potpisuje OSPORAVATELJ  (dokaz prijevare)
+OP_SHA256 <h1(i)> OP_EQUALVERIFY OP_SHA256 <h0(i)> OP_EQUALVERIFY <challenger> CHECKSIG
 ```
 
-Zato je matrica simetrična: 148 proverovih i 148 osporavateljevih listova. Isti witness
-format radi za oba puta — razlika je samo koji list i koji ključ.
+Ekvivokacija time nije tvrdnja koju netko mora dokazati — ona je **uvjet bez kojeg skript
+ne prolazi**. Provjereno 11/11, uključujući četiri negativna scenarija.
 
-### Zbrajač
+**Nije BitVM2:** nema garbled circuits, nema bisectiona, i na lancu se ne dokazuje da je
+otkriveni bit lažan za tvrdnju — samo da su otkrivena dva proturječna.
 
-Ripple-carry, 8 + 8 bitova → 8 bitova sume + carry out:
+### Matrica skriptova (`src/gate_matrix.hpp`, `bec-matrix`)
 
-```
-  bit 0:  s0 = a0 XOR b0 ,   c1 = a0 AND b0                        (2 gatea)
-  bit i:  t  = ai XOR bi ,   si = t XOR ci ,
-          u  = ai AND bi ,   v  = t AND ci ,   c(i+1) = u OR v     (5 gatea)
+8-bitni zbrajač kao 37 gatea × 8 listova + timeout = **297 listova**. Za svaku kombinaciju
+`(va,vb,vc)` postoji vlastiti list: konzistentne potpisuje prover, nekonzistentne
+osporavatelj. Bez OP_CAT — svaka žica se provjerava zasebnim commitmentom.
 
-  2 + 7×5 = 37 gatea,  54 žice (commitmenta),  37×8 + 1 = 297 listova
-  dubina skriptnog stabla 9  →  kontrolni blok 321 B
-```
+Provjereno 15/15, uključujući ključni par: isti list potpisan pogrešnim ključem pada.
 
-Provjereno offline na svih 256 ulaznih kombinacija prije nego je ijedan potpis
-napravljen: 0 grešaka. `200 + 100 = 300` daje sumu `0x2C` i `carry = 1` — što je i
-točno, jer 300 ne stane u 8 bitova.
-
-### List gatea — bez OP_CAT
-
-```
-  OP_SHA256 <h(wc,vc)> OP_EQUALVERIFY
-  OP_SHA256 <h(wb,vb)> OP_EQUALVERIFY
-  OP_SHA256 <h(wa,va)> OP_EQUALVERIFY
-  <ključ> OP_CHECKSIG
-
-  h(w,v) = SHA256( SHA256( 0x02 ‖ w_le32 ‖ v ‖ salt ) )
-  witness = [sig, preimage(wa,va), preimage(wb,vb), preimage(wc,vc)]
-```
-
-Ne provjeravamo "hash(va‖vb‖vc) == commitment" — to bi tražilo OP_CAT. Provjeravamo
-**svaku žicu zasebno**, pa se tri 32-bajtna preimagea predaju u witnessu i svaki se
-hashira u svoj commitment. Ništa se ne spaja na lancu, pa OP_CAT nije potreban.
-
-Redoslijed u skriptu je obrnut od redoslijeda u witnessu jer Script troši s vrha
-stacka. To je detalj zbog kojeg skript tiho pada ako se pogodi naopako.
-
-### Provjereno na nodeu
-
-| scenarij | rezultat |
-|---|---|
-| prover: konzistentan gate + njegov ključ | **prihvaćen, potvrđen** |
-| prover: zadnji gate (carry out), indeks 291 | **prihvaćen, potvrđen** |
-| osporavatelj: nekonzistentan gate + njegov ključ | **prihvaćen, bond preuzet, potvrđen** |
-| konzistentan list, potpisao osporavatelj | odbijen `Invalid Schnorr signature` |
-| nekonzistentan list, potpisao prover | odbijen `Invalid Schnorr signature` |
-| pogrešan preimage | odbijen `OP_EQUALVERIFY failed` |
-| proverov timeout prije CSV-a | odbijen `non-BIP68-final` |
-| proverov timeout nakon CSV-a | **prihvaćen, potvrđen** |
-
-Ključni par su testovi 4 i 6. Isti gate, isti list, ista transakcija — ali u jednom
-slučaju potpisuje ključ koji tom listu pripada, a u drugom ne. Ishod je suprotan.
-To je dokaz da matrica stvarno razlikuje "gate je dobar" od "gate je pokvaren", a ne
-da test prolazi sam od sebe.
-
-### Što ovo još nije — i zašto je to važno
-
-Ovo je **jedan gate po transakciji**. Da bi se dokazalo da je cijelih 37 gatea
-konzistentno, treba ili 37 transakcija, ili bisection protokol. BitVM2 koristi
-bisection: osporavatelj i prover se logaritamski sužavaju na jedan sporan gate, pa
-osporavanje cijelog izračuna stane u O(log n) rundi.
-
-| BitVM2 ima | Ovdje |
-|---|---|
-| matrica skriptova po gateu | ✅ — 8 listova po gateu, 297 za zbrajač |
-| odvojen proverov i osporavateljev put | ✅ — po ključu u listu |
-| bez OP_CAT (tri odvojena commitmenta) | ✅ |
-| bisection preko razina poziva | ✗ — jedan gate po transakciji |
-| garbled circuits za same vrijednosti žica | ✗ — žice su proverove tvrdnje |
-| commitment na cijeli program | ✗ — samo na matricu gateova |
-
-Dakle: **matrica je stvarna i radi na konsenzusu**, ali protokol oko nje nije potpun.
-Bez bisectiona osporavanje košta O(n) transakcija, što je za zbrajač izvedivo, a za
-stvarni program ne.
-
-### Ime, opet
-
-Ovo je prvi komad BitVM2 koji je doista BitVM2: gate matrica s odvojenim proverovim i
-osporavateljevim putem. Ono što nedostaje nije kriptografija nego **protokol** —
-bisection. Zato u naslovu piše "matrica skriptova", a ne "BitVM2".
+**Nije BitVM2 protokol:** jedan gate po transakciji, bez bisectiona. Osporavanje cijelog
+zbrajača košta do 37 transakcija umjesto `O(log 37) ≈ 6`.
 
 ---
 
@@ -473,101 +200,140 @@ bisection. Zato u naslovu piše "matrica skriptova", a ne "BitVM2".
 | Datoteka | Sadržaj |
 |---|---|
 | `src/crypto.hpp` | Pravi SHA-256, `tagged_hash` (BIP-340), hex, **bech32m** (BIP-350) |
-| `src/taproot.hpp` | Merkle stablo + dokaz, tapscript gradnja, **BIP-341** skriptno stablo, taptweak, kontrolni blok, **sighash**, serijalizacija tx |
-| `src/musig.hpp` | **BIP-327** MuSig2: agregacija ključeva, dvije runde, agregacija potpisa, taptweak kroz keyagg cache |
-| `src/protect.hpp` | NUMS internal key + operatorski CSV list (zaštita exita) |
-| `src/challenge.hpp` | challenge/response: claim list, challenge list, claim_digest |
-| `src/bitvm.hpp` | BitVM jezgra: bit commitment (h0/h1), penalty list, bond timeout |
-| `src/bitvm_main.cpp` | CLI `bec-bitvm`: `bond`, `penalty`, `timeout` (zaseban binarij) |
-| `src/gate_matrix.hpp` | **BitVM2 matrica**: žičani commitmenti, 8 listova po gateu, 8-bitni zbrajač |
+| `src/taproot.hpp` | Merkle + dokaz, tapscript, **BIP-341** skriptno stablo, taptweak, kontrolni blok, **sighash**, serijalizacija |
+| `src/musig.hpp` | **BIP-327**: agregacija ključeva, dvije runde, agregacija potpisa, taptweak kroz cache |
+| `src/protect.hpp` | NUMS internal key + CSV listovi |
+| `src/challenge.hpp` | claim/challenge listovi, `claim_digest` |
+| `src/bitvm.hpp` | bit commitment, penalty list, bond timeout |
+| `src/gate_matrix.hpp` | **matrica skriptova**: žičani commitmenti, 8 listova po gateu, 8-bitni zbrajač |
+| `src/vtxo.hpp` | **VTXO**: ključevi po korisniku, grupni ključ, plan kruga, MuSig2 key-path |
+| `src/vtxo_round.hpp` | model kruga: funding tx, grupne tx, potpisivanje, manifest |
+| `src/main.cpp` | CLI `bec`: `genkeys`, `commit`, `spend-*`, `proof` |
+| `src/bitvm_main.cpp` | CLI `bec-bitvm`: `bond`, `penalty`, `timeout` |
 | `src/matrix_main.cpp` | CLI `bec-matrix`: `build`, `proof-ok`, `proof-bad`, `timeout` |
-| `src/main.cpp` | CLI: `genkeys`, `commit`, `spend-keypath`, `spend-scriptpath`, `spend-op-exit`, `spend-challenge`, `proof` |
-| `test/run_regtest.sh` | MuSig2 / Taproot / exiti / challenge: 28 provjera, 6 negativnih |
-| `test/run_bitvm.sh` | BitVM jezgra: 11 provjera, 4 negativne |
-| `test/run_matrix.sh` | BitVM2 matrica: 15 provjera, 4 negativne |
+| `src/vtxo_main.cpp` | CLI `bec-vtxo`: `opkey`, `round`, `exit`, `forge`, `scale` |
+| `test/run_regtest.sh` | 28 provjera |
+| `test/run_bitvm.sh` | 11 provjera |
+| `test/run_matrix.sh` | 15 provjera |
+| `test/run_vtxo.sh` | 18 provjera |
 
 Nema vanjskih ovisnosti osim `libsecp256k1`. Nema OpenSSL-a, nema boost-a, nema Bitcoin Core
 libraryja — namjerno, da se svaki korak može pročitati.
 
 ---
 
-## Što je ispravljeno u odnosu na originalnu verziju
+## Instalacija
 
-| Original | Sada |
-|---|---|
-| `sha256_double` = `(x*33)^0x5C` po bajtu | pravi SHA-256 + `tagged_hash` |
-| Merkle root = `H(jedan list ‖ 0xAA…)` | pravo stablo nad svih 5000 listova + dokaz |
-| potpis `batch[0]` ključem, verifikacija protiv `batch[0]` | MuSig2 dvije runde, verifikacija protiv **tweakane output točke** |
-| nema MuSig2 rundi | `nonce_gen` → `nonce_agg` → `nonce_process` → `partial_sign` → `partial_sig_agg` |
-| taptweak = sirovi Merkle root | `t = H("TapTweak", internal ‖ script_root)` |
-| operatori mogu potrošiti odmah i pretrčati exit | `--protect`: NUMS internal key + operatorski CSV 288 > korisnički 144 |
-| lažni izlaz nije kažnjiv | `--challenge`: digest u skriptu + prozor + oduzimanje uz dokaz |
-| "Covenant verified" = tautologija | stvarni CSV exit koji Bitcoin Core prihvaća |
-| `Main2.cpp` se ne kompajlira | jedan program, jedan `main.cpp` |
-| nema validacije ulaza | strogi hex, provjera svake povratne vrijednosti |
-| nema `context_randomize` | randomiziran kontekst, `secure_zero` nad tajnama |
-| — | **bug nađen i popravljen:** promovirani čvor u ne-potenciji dvojke dobivao je lažni sibling |
+```bash
+# 1. libsecp256k1 iz izvora (OBAVEZNO — distribucijski paket nema musig modul)
+git clone --depth 1 https://github.com/bitcoin-core/secp256k1.git
+cd secp256k1 && ./autogen.sh
+./configure --enable-module-musig --enable-experimental \
+            --enable-module-extrakeys --enable-module-schnorrsig \
+            --prefix=$PWD/../secp-inst
+make -j"$(nproc)" && make install && cd ..
+
+# 2. svi programi
+bash test/build.sh
+```
+
+Bitcoin Core za test: [bitcoincore.org/bin](https://bitcoincore.org/bin/bitcoin-core-27.1/).
+
+---
+
+## Korištenje — VTXO krug
+
+```bash
+export LD_LIBRARY_PATH=../secp-inst/lib
+
+# 1) operatorov ključ i adresa za financiranje
+./bec-vtxo opkey --hrp bcrt > op.txt
+
+# 2) nakon uplate na tu adresu: krug
+./bec-vtxo round --users 5000 --fanout 64 --amount 100000 --delay 144 \
+        --op-key <hex> --fund-txid <txid> --fund-vout <n> --fund-amount <sats> \
+        --change-script <hex> --out-dir .            # round.txt + tx_000.hex …
+
+# 3) broadcast u redoslijedu: funding, pa grupne tx
+bitcoin-cli sendrawtransaction $(cat tx_000.hex)
+for f in tx_001.hex tx_002.hex …; do bitcoin-cli sendrawtransaction $(cat $f); done
+
+# 4) korisnik izlazi sam, nakon CSV-a
+./bec-vtxo exit --round round.txt --user 5 --txid <vtxo-txid> --vout 1 \
+        --amount 100000 --dest-script <hex> --fee 1000 --sequence 144 --out exit.hex
+
+# 5) pokušaj prijevare (mora pasti)
+./bec-vtxo forge --round round.txt --group 0 --bump 1000 --out forge.hex
+
+# 6) plan za veliki krug, bez ijedne transakcije
+./bec-vtxo scale --users 5000 --fanout 64
+```
+
+Ostali programi (`bec`, `bec-bitvm`, `bec-matrix`) opisani su u svojim sekcijama iznad.
+
+---
+
+## Testovi
+
+```bash
+export BITCOIN_BIN=/put/do/bitcoin-27.1/bin
+export SECP_PREFIX=/put/do/secp-inst
+
+bash test/run_regtest.sh   # 28 — MuSig2, Taproot, exiti, challenge
+bash test/run_bitvm.sh     # 11 — BitVM bond, ekvivokacija, timeout
+bash test/run_matrix.sh    # 15 — matrica, 8-bitni zbrajač
+bash test/run_vtxo.sh      # 18 — VTXO krug, exit, prijevara
+```
+
+Svaka skripta diže **vlastiti** regtest node (`.regtest-data/`, `.regtest-bitvm/`,
+`.regtest-matrix/`, `.regtest-vtxo/`), rudari svoje blokove i gasi ga na kraju.
+Ne dira postojeći node i ne dijele stanje.
 
 ---
 
 ## Ograničenja — što još NIJE napravljeno
 
-Ovo je pošteni popis, ne marketinški.
+Pošten popis, ne marketinški.
 
-**0. Iznos izlaza se ne može provjeriti U SKRIPTI — brani se ekonomski, ne kriptografski.**
-`--challenge` čini lažnu tvrdnju kažnjivom, a BitVM jezgra čini ekvivokaciju dokazivom
-na lancu. Ali skripta i dalje **ne zna** koliko korisniku pripada, niti da je pojedini
-otkriveni bit lažan za tvrdnju — to se provjerava izvan lanca. Za kriptografsku
-garanciju treba covenant (CTV / OP_CAT) ili pun BitVM2 s garbled circuits.
-Najveće preostalo ograničenje i ono koje razdvaja ovaj kod od upotrebljivog L2 rješenja.
+**1. Ovo nije L2 protokol.** Nema konsenzusa među operatorima, nema gossip-a, nema
+perzistentnog stanja, nema oporavka od pada. VTXO je **settlement sloj** koji L2 može
+koristiti, ne gotov L2.
 
-**1. Verifikacija Merkle dokaza *unutar* skripte traži OP_CAT.**
-OP_CAT (BIP-347) nije aktiviran na Bitcoinu. Bez njega se u tapscriptu ne mogu spojiti dva
-32-bajtna hasha u 64-bajtni preimage, pa se inclusion proof ne može provjeriti on-chain.
-Zato je ovdje:
-- state root **komitiran u output key** (preko svakog exit lista) — mijenjanje stanja mijenja adresu;
-- inclusion proof se **provjerava off-chain** (`./bec proof`);
-- on-chain exit ide preko **CSV delay + korisnikov ključ** — korisnik stvarno može izaći sam.
+**2. Krug traži sve potpisnike online.** Grupna tx se ne može potpisati ako netko nedostaje.
+To je jednokratno i prije nego grupni output postoji, ali je stvarno usko grilo. Ark rješava
+istu stvar na isti način.
 
-**2. Dvije runde komunikacije su stvarno usko grlo.**
-U testu su svi potpisnici u istom procesu. U stvarnosti 3 operatora moraju razmijeniti nonce
-i parcijalne potpise preko mreže. Kod je struktuiran tako da se to doda (nonce i potpisi su
-serijalizabilni preko `secp256k1_musig_pubnonce_serialize` / `partial_sig_serialize`), ali
-mrežni sloj nije napisan.
+**3. Nema state machine.** Prijelazi stanja, rješavanje konflikta dvaju valjanih prijelaza i
+pravila tko smije potpisati — nije napisano.
 
-**3. Nonce management nije produkcijski.**
-`secnonce` se drži u memoriji i nulira na kraju. Produkcijski potpisnik mora koristiti
-`musig_nonce_gen_counter` s perzistentnim brojačem i nikad ne smije serijalizirati `secnonce`.
-Ponovna upotreba noncea = gubitak privatnog ključa. To je dokumentirano u kodu, ali nije
-riješeno na razini HSM-a.
+**4. Nema watchtowera ni data availability jamstva.** Za VTXO sigurnost watchtower nije
+potreban (korisnik izlazi sam). Ali korisnik mora **imati** svoje podatke: ako izgubi
+`round.txt` i svoj ključ, izgubio je novac. To je najčešći stvarni gubitak u ovakvim
+sustavima, ne kriptografski napad.
 
-**4. `--leaves` mora biti potencija dvojke** ako želiš descriptor usporedbu s Bitcoin Core.
-Razlog: descriptor jezik ne može izraziti `raw()` unutar `tr()`, pa se usporedba radi s
-`pk()` listovima. U `--protect` načinu descriptor se uopće ne ispisuje jer sadrži CSV listove
-koje `raw()` ne može opisati unutar `tr()` — adresa se tamo dokazuje potrošnjom, ne deskriptorom.
+**5. Nonce management nije produkcijski.** `secnonce` se drži u memoriji i nulira na kraju.
+Produkcijski potpisnik mora koristiti `musig_nonce_gen_counter` s perzistentnim brojačem i
+nikad ne smije serijalizirati `secnonce`. Ponovna upotreba = gubitak ključa.
 
-**4b. Broj exit listova ≤ broj korisnika.** Ako je korisnika 5000, a listova 4096 (i još jedan
-za operatore), onda dio korisnika **nema nijednu on-chain putanju** — samo off-chain dokaz,
-koji bez covenanta ne vrijedi ništa. U produkciji broj listova mora biti ≥ broj korisnika + 1.
+**6. Iznos se ne provjerava U SKRIPTI — i to ostaje tako.** U VTXO modelu to nije problem,
+jer se iznos ne provjerava nego upisuje. Ali to znači da rješenje nije "covenant u skripti",
+nego "arhitektura bez zajedničkog UTXO-a". Za covenant bi trebao CTV (BIP-119, još draft)
+ili OP_CAT (BIP-347, specifikacija dovršena, **nije aktiviran**).
 
-**5. Matrica provjerava jedan gate, ne cijeli izračun.** Bez bisection protokola
-osporavanje zbrajača košta do 37 transakcija umjesto O(log 37) ≈ 6. Kriptografija je tu;
-protokol nije. Vidi tablicu u sekciji o matrici.
+**7. Matrica provjerava jedan gate.** Bez bisectiona osporavanje košta O(n) transakcija.
 
-**6. Ovo nije L2 protokol.** Nema konsenzusa među operatorima, nema gossip-a, nema
-perzistentnog stanja, nema oporavka od pada. To je kriptografska jezgra settlementa —
-temelj na koji se L2 priča može graditi, ne gotov L2.
+**8. Likvidnost.** Operator mora vezati kapital za svaki krug. To je ekonomski, ne tehnički
+problem — i obično onaj koji ovakve projekte ubije.
 
 ---
 
 ## Sigurnosne napomene
 
-- `secp256k1_musig` je **eksperimentalni modul**. Njegov API nije stabilan. Sam build ispisuje
-  *"Experimental features do not have stable APIs or properties, and may not be safe for
-  production use."* Ovo nije kod za držanje stvarnih sredstava bez vanjskog audita.
-- Privatni ključevi u testu su generirani lokalno i namijenjeni isključivo regtestu.
-- `keys.txt`, `operators.txt`, `prover.txt`, `challenger.txt`, `bond.txt`, `matrix.txt` sadrže
-  **tajne u čistom tekstu**. Nikad ih ne commitaj u git. Dodani su u `.gitignore`.
+- `secp256k1_musig` je **eksperimentalni modul**. Build ispisuje *"Experimental features do
+  not have stable APIs or properties, and may not be safe for production use."*
+- Ovo nije kod za držanje stvarnih sredstava bez vanjskog audita.
+- `op.txt`, `round.txt`, `keys.txt`, `operators.txt` i `*.hex` sadrže **tajne u čistom
+  tekstu**. Nikad ih ne commitaj. U `.gitignore` su.
 
 ---
 
