@@ -37,7 +37,15 @@ g++ -std=c++17 -O2 -Wall -Wextra \
     -L"$SECP_PREFIX/lib" -lsecp256k1
 echo "    $ROOT/bec"
 
-echo "==> 3/3  gotovo"
+echo "==> 3/3  bec-bitvm binary (BitVM jezgra)"
+g++ -std=c++17 -O2 -Wall -Wextra \
+    -I"$SECP_PREFIX/include" \
+    "$ROOT/src/bitvm_main.cpp" \
+    -o "$ROOT/bec-bitvm" \
+    -L"$SECP_PREFIX/lib" -lsecp256k1
+echo "    $ROOT/bec-bitvm"
+
+echo "==> gotovo"
 echo
 echo "Pokretanje testa na Bitcoin Core regtestu:"
 echo "  BITCOIN_BIN=/put/do/bitcoin-27.1/bin SECP_PREFIX=$SECP_PREFIX \\"
