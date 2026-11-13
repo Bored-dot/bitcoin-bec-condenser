@@ -1,6 +1,7 @@
 # binariji
 bec
 bec-bitvm
+bec-matrix
 *.o
 
 # lokalno stanje testa
@@ -8,6 +9,8 @@ bec-bitvm
 .testrun/
 .regtest-bitvm/
 .testrun-bitvm/
+.regtest-matrix/
+.testrun-matrix/
 
 # TAJNI KLJUČEVI — nikad ne commitaj
 keys.txt
@@ -16,6 +19,7 @@ keys*.txt
 operators*.txt
 prover.txt
 challenger.txt
+matrix.txt
 
 # izlaz
 *.hex
