@@ -1,0 +1,79 @@
+
+═══ 0. Bitcoin Core regtest
+  verzija: Bitcoin Core version v27.1.0
+  blokova: 150
+  ✅ PASS  regtest node radi
+
+═══ 1. Krug — 3 korisnika, VTXO-i na lancu
+    Korisnika                            : 3
+    Grupa (fanout 3)                      : 1
+    CSV delay za unilateralni exit       : 20 blokova
+    On-chain tx-ova                      : 2  (1 funding + 1 grupnih)
+  ✅ PASS  krug potvrđen, VTXO-i postoje na lancu
+  grupna tx: df80a31cf926d50f04622633943e001f84b0e36868c74af8e0411a2ceddd017d
+
+═══ 2. L2 genesis
+    VTXO                  : df80a31cf926d50f04622633943e001f84b0e36868c74af8e0411a2ceddd017d:0
+    Iznos                 : 20000 sats
+    CSV delay             : 20 blokova
+    chain tip             : b94b746d3aa48d214f8ab1cc1de7aa6878b7b1122ee0095a354b0f619513f32b
+  ✅ PASS  početno stanje zapisano
+  ✅ PASS  VTXO registriran u stanju (df80a31cf926d50f04622633943e001f84b0e36868c74af8e0411a2ceddd017d:0)
+
+═══ 3. Transfer A → B (pre-potpisan, NIJE broadcastan)
+  ========== L2 TRANSFER (pre-potpisan, NIJE broadcastan) ==========
+    iz    : df80a31cf926d50f04622633943e001f84b0e36868c74af8e0411a2ceddd017d:0  (20000 sats)
+    u     : 3aff52e0fb490c2578800df1deb9ccbdd8f865167f161ba8d5a77ba4942deaa5:0  (19000 sats, fee 1000)
+    txid  : 3aff52e0fb490c2578800df1deb9ccbdd8f865167f161ba8d5a77ba4942deaa5
+    potpis: MuSig2(operator + vlasnik), key-path kroz taptweak
+  ✅ PASS  transfer tx je valjan ODMAH (key-path, bez CSV-a) — node prihvaća
+  ✅ PASS  novi VTXO upisan u stanje (3aff52e0fb490c2578800df1deb9ccbdd8f865167f161ba8d5a77ba4942deaa5:0)
+  ✅ PASS  stari VTXO označen kao potrošen off-chain
+  ✅ PASS  B je vlasnik off-chain, bez ijedne on-chain transakcije
+
+═══ 4. NEGATIVNI — A pokušava izaći prije CSV-a
+  ✅ PASS  A-ov exit prije 20 blokova — node odbija: non-BIP68-final
+
+═══ 5. Transfer kroz lanac — i A-ov exit postaje mrtav
+  visina: 154
+  nakon CSV prozora: visina 179
+  ✅ PASS  A-ov exit nakon CSV-a (VTXO potrošen transferom) — node odbija: missing-inputs
+
+═══ 6. B izlazi sam iz novog VTXO-a
+    VTXO          : 3aff52e0fb490c2578800df1deb9ccbdd8f865167f161ba8d5a77ba4942deaa5:0  (19000 sats)
+    nSequence     : 20
+    Izlaz         : 18000 sats
+  ✅ PASS  B-ov unilateralni exit (bez operatora) — node prihvaća
+  ✅ PASS  B-ov exit potvrđen u bloku
+
+═══ 7. NEGATIVNI — netko drugi potpisuje B-ov exit
+  ✅ PASS  tuđi ključ na B-ovom VTXO-u — node odbija: mandatory-script-verify-flag-failed (Invalid Schnorr signature)
+  kontrola: isti iznos i fee, ISPRAVAN ključ mora proći
+  ✅ PASS  kontrola: vlasnikov potpis s istim fee prolazi — node prihvaća
+
+═══ 8. KONFLIKT — A dvaput potpiše isti VTXO
+  ========== L2 KONFLIKT (A potpisuje isti VTXO dvaput) ==========
+    VTXO              : df80a31cf926d50f04622633943e001f84b0e36868c74af8e0411a2ceddd017d:2  (20000 sats)
+    prijenos 1        : 1bc57335c4d8f1ee2429a2df18ca4e5cd3d0e19578a50e3608132c27b550dfaf
+    prijenos 2        : 62ddb311446e491cfda5ccc15fb4dbfde049615fe94fb1a72248f9637683a787
+    isti outpoint     : df80a31cf926d50f04622633943e001f84b0e36868c74af8e0411a2ceddd017d:2 u obje transakcije
+    → to je dokaz da je A dvaput potpisao isti VTXO
+    → lanac može potvrditi SAMO jednu; druga je mrtva
+  ✅ PASS  prijenos 1 je valjan — node prihvaća
+  ✅ PASS  prijenos 2 je valjan (to JE dokaz prijevare) — node prihvaća
+  ✅ PASS  prijenos 2 nakon što je prijenos 1 potvrđen — node odbija: missing-inputs
+
+═══ 9. Revizija dokazivog lanca
+    VTXO-a ukupno     : 2
+    potrošeno         : 1
+    aktivno           : 1  (19000 sats)
+    prijelaza         : 2
+    lanac             : OK (svaki digest odgovara prethodnom)
+    vlasništvo        : OK (nijedan VTXO nije potrošen dvaput)
+  ✅ PASS  digest lanac je ispravan
+  ✅ PASS  nijedan VTXO nije potrošen dvaput
+  ✅ PASS  audit vraća exit 0 kad je sve ispravno
+
+═══ SAŽETAK
+  PASS: 20   FAIL: 0
+  🎉 SVI TESTOVI PROŠLI — L2 petlja potvrđena na Bitcoin Core konsenzusu.

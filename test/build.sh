@@ -11,7 +11,7 @@ SECP_SRC="${SECP_SRC:-$ROOT/../secp256k1}"
 SECP_PREFIX="${SECP_PREFIX:-$ROOT/../secp-inst}"
 JOBS="${JOBS:-$(nproc)}"
 
-echo "==> 1/5  libsecp256k1"
+echo "==> 1/6  libsecp256k1"
 if [ ! -f "$SECP_PREFIX/include/secp256k1_musig.h" ]; then
   if [ ! -d "$SECP_SRC" ]; then
     echo "    kloniram secp256k1 ..."
@@ -29,7 +29,7 @@ else
   echo "    već postoji: $SECP_PREFIX"
 fi
 
-echo "==> 2/5  bec binary"
+echo "==> 2/6  bec binary"
 g++ -std=c++17 -O2 -Wall -Wextra \
     -I"$SECP_PREFIX/include" \
     "$ROOT/src/main.cpp" \
@@ -37,7 +37,7 @@ g++ -std=c++17 -O2 -Wall -Wextra \
     -L"$SECP_PREFIX/lib" -lsecp256k1
 echo "    $ROOT/bec"
 
-echo "==> 3/5  bec-bitvm binary (BitVM jezgra)"
+echo "==> 3/6  bec-bitvm binary (BitVM jezgra)"
 g++ -std=c++17 -O2 -Wall -Wextra \
     -I"$SECP_PREFIX/include" \
     "$ROOT/src/bitvm_main.cpp" \
@@ -45,7 +45,7 @@ g++ -std=c++17 -O2 -Wall -Wextra \
     -L"$SECP_PREFIX/lib" -lsecp256k1
 echo "    $ROOT/bec-bitvm"
 
-echo "==> 4/5  bec-matrix binary (BitVM2 matrica skriptova)"
+echo "==> 4/6  bec-matrix binary (BitVM2 matrica skriptova)"
 g++ -std=c++17 -O2 -Wall -Wextra \
     -I"$SECP_PREFIX/include" \
     "$ROOT/src/matrix_main.cpp" \
@@ -53,13 +53,21 @@ g++ -std=c++17 -O2 -Wall -Wextra \
     -L"$SECP_PREFIX/lib" -lsecp256k1
 echo "    $ROOT/bec-matrix"
 
-echo "==> 5/5  bec-vtxo binary (VTXO settlement)"
+echo "==> 5/6  bec-vtxo binary (VTXO settlement)"
 g++ -std=c++17 -O2 -Wall -Wextra \
     -I"$SECP_PREFIX/include" \
     "$ROOT/src/vtxo_main.cpp" \
     -o "$ROOT/bec-vtxo" \
     -L"$SECP_PREFIX/lib" -lsecp256k1
 echo "    $ROOT/bec-vtxo"
+
+echo "==> 6/6  bec-l2 binary (L2 sloj: prijelazi, exit, konflikti)"
+g++ -std=c++17 -O2 -Wall -Wextra \
+    -I"$SECP_PREFIX/include" \
+    "$ROOT/src/l2_main.cpp" \
+    -o "$ROOT/bec-l2" \
+    -L"$SECP_PREFIX/lib" -lsecp256k1
+echo "    $ROOT/bec-l2"
 
 echo "==> gotovo"
 echo

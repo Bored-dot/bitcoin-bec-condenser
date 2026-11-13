@@ -1,16 +1,17 @@
-# Bitcoin BEC Condenser — VTXO settlement na Bitcoinu
+# Bitcoin BEC Condenser — VTXO settlement + L2 prijelazi
 
 MuSig2 (BIP-327) + Taproot (BIP-341) settlement za L2 stanje, **testirano na Bitcoin Core konsenzusu**.
 
-Ovaj projekt je prošao kroz tri arhitekture i README to ne skriva:
+Ovaj projekt je prošao kroz četiri arhitekture i README to ne skriva:
 
 1. **Simulacija** (originalna verzija) — lažni hash, potpis jednim ključem, "covenant verified"
    koji ništa nije provjeravao. Uklonjeno.
 2. **Jedan UTXO + exit listovi** — pravi MuSig2 i Taproot, ali sa strukturnim problemom:
-   skripta ne vidi iznos, pa korisnik koji izađe podigne cijeli UTXO. Dokumentirano dolje
-   kao *Zašto je model promijenjen*.
-3. **VTXO — jedan output po korisniku** — trenutna arhitektura. Iznos nije tvrdnja u skripti,
-   nego činjenica na lancu.
+   skripta ne vidi iznos, pa korisnik koji izađe podigne cijeli UTXO.
+3. **VTXO — jedan output po korisniku** — iznos nije tvrdnja u skripti, nego činjenica
+   na lancu.
+4. **L2 sloj — prijelazi stanja** — vrijednost prelazi od A do B pre-potpisanom
+   transakcijom koja se ne broadcasta, a konflikte rješava konsenzus.
 
 Sve u ovom repou potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu — ne ispisom u terminalu.
 
@@ -24,8 +25,9 @@ Sve u ovom repou potvrđeno je stvarnim transakcijama u Bitcoin Core regtestu �
   test/run_bitvm.sh     BitVM jezgra (bit-commitment bond)         11/11
   test/run_matrix.sh    BitVM2 matrica skriptova (8-bit zbrajač)   15/15
   test/run_vtxo.sh      VTXO settlement                            18/18
+  test/run_l2.sh        L2 prijelazi, exit, konflikti              20/20
 ────────────────────────────────────────────────────────────────
-  UKUPNO: 72 provjere, 14 negativnih
+  UKUPNO: 92 provjere, 17 negativnih
 ════════════════════════════════════════════════════════════════
 ```
 
@@ -38,8 +40,6 @@ Detaljni rezultati: `test/expected_output*.txt`.
 
 ## Zašto je model promijenjen
 
-Ovo je najvažnija sekcija u dokumentu i zato je na početku.
-
 **Skripta ne vidi iznose.** Tapscript izvršava uvjete nad podacima koje mu witness preda;
 nema pristup outputima transakcije koja ga troši. Zato nijedan skript ne može provjeriti
 *"odgovara li ovaj izlaz mom balansu"*.
@@ -48,12 +48,11 @@ Iz toga slijedi da model s **jednim zajedničkim UTXO-om** ima posljedicu koju t
 korisnik koji izađe podigne **cijeli UTXO**. Pošten izlaz i prijevara su u tom trenutku
 ekonomski identični — i jedan i drugi unište tuđa sredstva.
 
-Challenge/response iz PR #3 to čini *kažnjivim*, ali ne i *nemogućim*: digest je u skriptu,
-ali skript ga samo `OP_DROP`-a. Lanac provjerava *"osporavatelj zna ista 48 bajta"*, ne
-*"iznos je točan"*. To sam u PR #2 trebao reći jasnije.
+Challenge/response to čini *kažnjivim*, ali ne i *nemogućim*: digest je u skriptu, ali skript
+ga samo `OP_DROP`-a. Lanac provjerava *"osporavatelj zna ista 48 bajta"*, ne *"iznos je točan"*.
 
-**Rješenje ne treba covenant.** Ako se odustane od zajedničkog UTXO-a, problem iznosa
-prestaje postojati — jer se iznos ne provjerava, nego **upisuje**. To je VTXO model.
+**Rješenje ne treba covenant.** Ako nema zajedničkog UTXO-a, problem iznosa prestaje
+postojati — jer se iznos ne provjerava, nego **upisuje**. To je VTXO model.
 
 ---
 
@@ -91,12 +90,10 @@ Dvije putanje po VTXO-u:
 
 ### Zašto grupna tx ne može biti lažna
 
-Ovo je mehanizam koji zamjenjuje covenant, i provjeren je na lancu.
-
 Grupni output traži **MuSig2(operator + svi u grupi)**. Grupnu tx potpisuju svi.
 Parcijalni MuSig2 potpis je vezan na **jedan** sighash — ne može se prenijeti na drugu
-transakciju. Dakle: tko god odbije potpisati izmijenjenu tx, ta tx nikad neće imati valjan
-potpis, jer drugi potpis matematički ne postoji.
+transakciju. Tko odbije potpisati izmijenjenu tx, ta tx nikad neće imati valjan potpis,
+jer drugi potpis matematički ne postoji.
 
 Provjereno (`test/run_vtxo.sh`, sekcija 7):
 
@@ -106,32 +103,93 @@ Napadač (korisnik 0) traži  : 7000 sats (umjesto 5000)
 Zbroj outputa               : 20000 sats (nepromijenjen)
 Potpis                      : pošteni 64 B, jer potpis za ovu tx NE POSTOJI
 → node odbija: Invalid Schnorr signature
+→ kontrola: poštena grupna tx prolazi u istom trenutku
 ```
 
-I kontrolni test u istom trenutku: **poštena** grupna tx prolazi. Pad nije artefakt testa.
+### Skala
 
-### Cijena
+Za 5000 korisnika, fanout 64: **79 grupa, 80 on-chain tx-ova, 273 533 B, 54.7 B po
+korisniku, najveći MuSig2 skup 65 potpisnika.**
 
-Nema covenanta, ali nema ni besplatnog ručka. Poštena cijena je:
+Nema ijednog skupa veličine 5000 — dakle nema scenarija u kojem jedan offline korisnik
+zamrzne sva sredstva.
 
-| što | posljedica |
-|---|---|
-| svi u grupi moraju potpisati grupnu tx | jednokratno, prije nego grupni output postoji |
-| MuSig2 skup ≤ fanout + 1 | ne treba 5000-potpisni skup, ali treba 65-potpisni |
-| više outputa na lancu | ~55 B po korisniku (vidi `bec-vtxo scale`) |
+---
 
-Skala za 5000 korisnika, fanout 64:
+## L2 sloj — prijelazi stanja
+
+VTXO settlement rješava *koliko kome pripada na lancu*. Ne rješava *kako vrijednost prelazi
+od A do B bez on-chain transakcije*. To je ovaj sloj, i on zatvara petlju.
+
+### Transfer je pre-potpisana transakcija koja se ne objavljuje
 
 ```
-Grupa                        : 79
-On-chain tx-ova              : 80   (1 funding + 79 grupnih)
-Najveća grupa                : 64 korisnika (65 potpisnika)
-Ukupno on-chain (procjena)   : 273 533 B
-Po korisniku                 : 54.7 B
+A prenosi B-u:
+   tx:  VTXO(A) ──key-path MuSig2(op, A), bez CSV-a──► VTXO(B)
+
+   · potpisuju operator i A        → valjana odmah
+   · NE broadcasta se              → ostaje off-chain
+   · B je vlasnik u stanju         → njegov ključ, njegov exit list
 ```
 
-**Nema ijednog MuSig2 skupa veličine 5000.** To je ključna razlika u odnosu na ideju
-"svih 5000 u jedan agregat", gdje jedan offline korisnik zamrzne sva sredstva.
+### Zašto A ne može uzeti i jedno i drugo
+
+Mehanizam je vremenski, ne kriptografski:
+
+| | valjan od | potvrđuje se |
+|---|---|---|
+| **transfer tx** (key-path, bez CSV-a) | odmah | 1 blok |
+| **A-ov exit** (script-path, CSV D) | D blokova nakon nastanka VTXO-a | nakon toga |
+
+A **mora** čekati D blokova da bi uopće dobio pravo na exit. Transfer je valjan u prvoj
+sekundi. Dakle operator ili B imaju D blokova prednosti da objave transfer prije nego A
+uopće dođe do prava na izlaz. Provjereno:
+
+```
+A-ov exit prije CSV-a (20 blokova)          → non-BIP68-final
+transfer tx, ista sekunda                   → prihvaćen, potvrđen u 1 bloku
+A-ov exit nakon CSV-a                       → missing-inputs (VTXO je potrošen)
+```
+
+Treći red je poanta: kad A konačno dobije pravo na exit, **nema što trošiti**.
+
+### B ne treba operatora
+
+Ako operator nestane, B ima pre-potpisanu transakciju i može je objaviti sam. Time dobiva
+VTXO na lancu, pa izlazi nakon CSV-a svojim ključem. Provjereno: B-ov unilateralni exit
+prolazi bez ijednog operatorovog potpisa u toj transakciji.
+
+### Konflikt rješava konsenzus
+
+Ako A pokuša prenijeti isti VTXO i B-u i C-u, nastaju dvije kriptografski valjane
+transakcije koje troše **isti outpoint**:
+
+```
+prijenos 1 → valjan
+prijenos 2 → valjan
+prijenos 1 potvrđen u bloku
+prijenos 2 → missing-inputs   (mrtav, zauvijek)
+```
+
+Dvije stvari su time istovremeno istinite:
+
+1. **Prijevara je dokaziva.** B i C zajedno imaju dva potpisa na isti outpoint — to je
+   neporeciv dokaz da je A dvaput potpisao.
+2. **Prijevara ne može uspjeti dvaput.** Lanac ne može potvrditi obje; druga je mrtva bez
+   obzira što je potpis valjan.
+
+Operator odlučuje *koja* od dvije prolazi — to je stvarna pretpostavka i piše dolje.
+
+### Dokaziv lanac stanja
+
+Svaki prijelaz ima digest koji uključuje prethodni:
+
+```
+digest_i = SHA256("BEC/L2/v1" ‖ digest_{i-1} ‖ kind ‖ from ‖ to ‖ amount ‖ txid)
+```
+
+`bec-l2 audit` ponovno računa cijeli lanac i provjerava da nijedan VTXO nije potrošen
+dvaput. Operator ne može tiho prepisati povijest, a stranke mogu dokazati što se dogodilo.
 
 ---
 
@@ -152,16 +210,11 @@ eksplicitno, a ne u fusnoti.
 
 - BIP-341 adresa identična Bitcoin Core deskriptoru.
 - MuSig2 key-path: 99 vB, 64-bajtni potpis, potvrđeno u bloku.
-- NUMS + CSV zaštita: operator **ne može** pretrčati korisnika (CSV 288 > 144), potvrđeno
-  na visinama prije/poslije 144 i 288.
+- NUMS + CSV zaštita: operator **ne može** pretrčati korisnika (CSV 288 > 144).
 - Challenge/response: lažna tvrdnja je kažnjiva i dokaziva na lancu.
 
-Što u njemu **ne radi**:
-
-- Iznos. Skripta ga ne vidi, pa korisnik podigne cijeli UTXO.
-- Tuđa sredstva. Jedan UTXO znači da svaki exit dira sve ostale.
-
-Zato je VTXO model zamjena, a ne dodatak.
+Što u njemu **ne radi**: iznos (skripta ga ne vidi) i tuđa sredstva (jedan UTXO znači da
+svaki exit dira sve ostale).
 
 ---
 
@@ -170,16 +223,10 @@ Zato je VTXO model zamjena, a ne dodatak.
 ### BitVM jezgra (`src/bitvm.hpp`, `bec-bitvm`)
 
 Bit-commitment bond: za svaki indeks bita postoje `h0(i)` i `h1(i)`, a penalty list prihvaća
-**samo oba preimagea**:
+**samo oba preimagea**. Ekvivokacija time nije tvrdnja koju netko mora dokazati — ona je
+**uvjet bez kojeg skript ne prolazi**. Provjereno 11/11.
 
-```
-OP_SHA256 <h1(i)> OP_EQUALVERIFY OP_SHA256 <h0(i)> OP_EQUALVERIFY <challenger> CHECKSIG
-```
-
-Ekvivokacija time nije tvrdnja koju netko mora dokazati — ona je **uvjet bez kojeg skript
-ne prolazi**. Provjereno 11/11, uključujući četiri negativna scenarija.
-
-**Nije BitVM2:** nema garbled circuits, nema bisectiona, i na lancu se ne dokazuje da je
+**Nije BitVM2:** nema garbled circuits ni bisectiona, i na lancu se ne dokazuje da je
 otkriveni bit lažan za tvrdnju — samo da su otkrivena dva proturječna.
 
 ### Matrica skriptova (`src/gate_matrix.hpp`, `bec-matrix`)
@@ -188,10 +235,7 @@ otkriveni bit lažan za tvrdnju — samo da su otkrivena dva proturječna.
 `(va,vb,vc)` postoji vlastiti list: konzistentne potpisuje prover, nekonzistentne
 osporavatelj. Bez OP_CAT — svaka žica se provjerava zasebnim commitmentom.
 
-Provjereno 15/15, uključujući ključni par: isti list potpisan pogrešnim ključem pada.
-
-**Nije BitVM2 protokol:** jedan gate po transakciji, bez bisectiona. Osporavanje cijelog
-zbrajača košta do 37 transakcija umjesto `O(log 37) ≈ 6`.
+**Nije BitVM2 protokol:** jedan gate po transakciji, bez bisectiona.
 
 ---
 
@@ -208,14 +252,17 @@ zbrajača košta do 37 transakcija umjesto `O(log 37) ≈ 6`.
 | `src/gate_matrix.hpp` | **matrica skriptova**: žičani commitmenti, 8 listova po gateu, 8-bitni zbrajač |
 | `src/vtxo.hpp` | **VTXO**: ključevi po korisniku, grupni ključ, plan kruga, MuSig2 key-path |
 | `src/vtxo_round.hpp` | model kruga: funding tx, grupne tx, potpisivanje, manifest |
+| `src/l2_state.hpp` | **L2 stanje**: vlasništvo, prijelazi, dokaziv digest lanac, revizija |
 | `src/main.cpp` | CLI `bec`: `genkeys`, `commit`, `spend-*`, `proof` |
 | `src/bitvm_main.cpp` | CLI `bec-bitvm`: `bond`, `penalty`, `timeout` |
 | `src/matrix_main.cpp` | CLI `bec-matrix`: `build`, `proof-ok`, `proof-bad`, `timeout` |
 | `src/vtxo_main.cpp` | CLI `bec-vtxo`: `opkey`, `round`, `exit`, `forge`, `scale` |
+| `src/l2_main.cpp` | CLI `bec-l2`: `init`, `transfer`, `exit`, `conflict`, `audit`, `show` |
 | `test/run_regtest.sh` | 28 provjera |
 | `test/run_bitvm.sh` | 11 provjera |
 | `test/run_matrix.sh` | 15 provjera |
 | `test/run_vtxo.sh` | 18 provjera |
+| `test/run_l2.sh` | 20 provjera |
 
 Nema vanjskih ovisnosti osim `libsecp256k1`. Nema OpenSSL-a, nema boost-a, nema Bitcoin Core
 libraryja — namjerno, da se svaki korak može pročitati.
@@ -233,7 +280,7 @@ cd secp256k1 && ./autogen.sh
             --prefix=$PWD/../secp-inst
 make -j"$(nproc)" && make install && cd ..
 
-# 2. svi programi
+# 2. svi programi (bec, bec-bitvm, bec-matrix, bec-vtxo, bec-l2)
 bash test/build.sh
 ```
 
@@ -241,7 +288,9 @@ Bitcoin Core za test: [bitcoincore.org/bin](https://bitcoincore.org/bin/bitcoin-
 
 ---
 
-## Korištenje — VTXO krug
+## Korištenje
+
+### VTXO krug
 
 ```bash
 export LD_LIBRARY_PATH=../secp-inst/lib
@@ -262,14 +311,33 @@ for f in tx_001.hex tx_002.hex …; do bitcoin-cli sendrawtransaction $(cat $f);
 ./bec-vtxo exit --round round.txt --user 5 --txid <vtxo-txid> --vout 1 \
         --amount 100000 --dest-script <hex> --fee 1000 --sequence 144 --out exit.hex
 
-# 5) pokušaj prijevare (mora pasti)
-./bec-vtxo forge --round round.txt --group 0 --bump 1000 --out forge.hex
-
-# 6) plan za veliki krug, bez ijedne transakcije
+# 5) plan za veliki krug, bez ijedne transakcije
 ./bec-vtxo scale --users 5000 --fanout 64
 ```
 
-Ostali programi (`bec`, `bec-bitvm`, `bec-matrix`) opisani su u svojim sekcijama iznad.
+### L2 sloj — prijelazi između korisnika
+
+```bash
+# 1) početno stanje iz VTXO-a koji postoji na lancu
+./bec-l2 init --round round.txt --user 0 --txid <grupna-txid> --vout 0 --out state.txt
+
+# 2) A prenosi B-u — pre-potpisano, NE broadcasta se
+./bec-l2 transfer --state state.txt --vtxo <id> --to-sk <B-sk-hex> \
+        --fee 1000 --out transfer.hex
+
+# 3) ako operator nestane: B sam objavi transfer, pa izađe nakon CSV-a
+bitcoin-cli sendrawtransaction $(cat transfer.hex)
+./bec-l2 exit --state state.txt --vtxo <novi-id> --dest-script <hex> \
+        --fee 1000 --sequence 144 --out exit.hex
+
+# 4) dokaz prijevare: A dvaput potpiše isti VTXO
+./bec-l2 conflict --state state.txt --vtxo <id> \
+        --to-sk-a <B-sk> --to-sk-b <C-sk> --out-a a.hex --out-b b.hex
+
+# 5) revizija lanca i vlasništva (exit 0 ako je sve ispravno)
+./bec-l2 audit --state state.txt
+./bec-l2 show  --state state.txt
+```
 
 ---
 
@@ -283,46 +351,51 @@ bash test/run_regtest.sh   # 28 — MuSig2, Taproot, exiti, challenge
 bash test/run_bitvm.sh     # 11 — BitVM bond, ekvivokacija, timeout
 bash test/run_matrix.sh    # 15 — matrica, 8-bitni zbrajač
 bash test/run_vtxo.sh      # 18 — VTXO krug, exit, prijevara
+bash test/run_l2.sh        # 20 — off-chain transfer, exit, konflikt, revizija
 ```
 
 Svaka skripta diže **vlastiti** regtest node (`.regtest-data/`, `.regtest-bitvm/`,
-`.regtest-matrix/`, `.regtest-vtxo/`), rudari svoje blokove i gasi ga na kraju.
+`.regtest-matrix/`, `.regtest-vtxo/`, `.regtest-l2/`), rudari svoje blokove i gasi ga na kraju.
 Ne dira postojeći node i ne dijele stanje.
 
 ---
 
 ## Ograničenja — što još NIJE napravljeno
 
-Pošten popis, ne marketinški.
-
-**1. Ovo nije L2 protokol.** Nema konsenzusa među operatorima, nema gossip-a, nema
-perzistentnog stanja, nema oporavka od pada. VTXO je **settlement sloj** koji L2 može
-koristiti, ne gotov L2.
+**1. L2 petlja je zatvorena, ali protokol nije.** Prijelazi, unilateralni exit, konflikti
+i dokaziv lanac rade i testirani su. Nedostaje *operativni* sloj: mrežni transport za dvije
+runde MuSig2, perzistentno stanje s oporavkom, gossip, i watchtower kao servis. Bez toga
+je ovo biblioteka s CLI-jem, ne mreža.
 
 **2. Krug traži sve potpisnike online.** Grupna tx se ne može potpisati ako netko nedostaje.
-To je jednokratno i prije nego grupni output postoji, ali je stvarno usko grilo. Ark rješava
-istu stvar na isti način.
+Jednokratno je, prije nego grupni output postoji, ali je stvarno usko grilo.
 
-**3. Nema state machine.** Prijelazi stanja, rješavanje konflikta dvaju valjanih prijelaza i
-pravila tko smije potpisati — nije napisano.
+**2b. Operator bira pobjednika kad A dvaput potpiše.** U konfliktu su oba prijenosa valjana,
+a operator odlučuje koji ide dalje. Ne može ukrasti — nema ključeve — ali može proizvoljno
+odabrati. Prijevara je time *dokaziva*, ali ne *spriječena*. Rješenje traži duži exit prozor
+i kaznu, ne kod.
 
-**4. Nema watchtowera ni data availability jamstva.** Za VTXO sigurnost watchtower nije
-potreban (korisnik izlazi sam). Ali korisnik mora **imati** svoje podatke: ako izgubi
-`round.txt` i svoj ključ, izgubio je novac. To je najčešći stvarni gubitak u ovakvim
+**3. Netko mora biti živ unutar CSV prozora.** Ako A izađe i nitko ne objavi transfer u D
+blokova, A pobjeđuje. Ista pretpostavka kao kod svakog optimistic protokola.
+
+**4. Nema state machine za prijelaze veće od jednog VTXO-a.** Nema dijeljenja VTXO-a
+(split/merge), nema plaćanja u više izlaza, nema atomskog swap-a.
+
+**5. Nema data availability jamstva.** Korisnik mora imati svoje podatke: ako izgubi
+`state.txt` i svoj ključ, izgubio je novac. To je najčešći stvarni gubitak u ovakvim
 sustavima, ne kriptografski napad.
 
-**5. Nonce management nije produkcijski.** `secnonce` se drži u memoriji i nulira na kraju.
+**6. Nonce management nije produkcijski.** `secnonce` se drži u memoriji i nulira na kraju.
 Produkcijski potpisnik mora koristiti `musig_nonce_gen_counter` s perzistentnim brojačem i
 nikad ne smije serijalizirati `secnonce`. Ponovna upotreba = gubitak ključa.
 
-**6. Iznos se ne provjerava U SKRIPTI — i to ostaje tako.** U VTXO modelu to nije problem,
-jer se iznos ne provjerava nego upisuje. Ali to znači da rješenje nije "covenant u skripti",
-nego "arhitektura bez zajedničkog UTXO-a". Za covenant bi trebao CTV (BIP-119, još draft)
+**7. Iznos se ne provjerava U SKRIPTI — i to ostaje tako.** U VTXO modelu to nije problem,
+jer se iznos ne provjerava nego upisuje. Za covenant bi trebao CTV (BIP-119, još draft)
 ili OP_CAT (BIP-347, specifikacija dovršena, **nije aktiviran**).
 
-**7. Matrica provjerava jedan gate.** Bez bisectiona osporavanje košta O(n) transakcija.
+**8. Matrica provjerava jedan gate.** Bez bisectiona osporavanje košta O(n) transakcija.
 
-**8. Likvidnost.** Operator mora vezati kapital za svaki krug. To je ekonomski, ne tehnički
+**9. Likvidnost.** Operator mora vezati kapital za svaki krug. To je ekonomski, ne tehnički
 problem — i obično onaj koji ovakve projekte ubije.
 
 ---
@@ -332,8 +405,8 @@ problem — i obično onaj koji ovakve projekte ubije.
 - `secp256k1_musig` je **eksperimentalni modul**. Build ispisuje *"Experimental features do
   not have stable APIs or properties, and may not be safe for production use."*
 - Ovo nije kod za držanje stvarnih sredstava bez vanjskog audita.
-- `op.txt`, `round.txt`, `keys.txt`, `operators.txt` i `*.hex` sadrže **tajne u čistom
-  tekstu**. Nikad ih ne commitaj. U `.gitignore` su.
+- `op.txt`, `state.txt`, `round.txt`, `keys.txt`, `operators.txt` i `*.hex` sadrže **tajne u
+  čistom tekstu**. Nikad ih ne commitaj. U `.gitignore` su.
 
 ---
 
