@@ -8,6 +8,7 @@
 #   3. Korisnikov unilateralni script-path exit prolazi konsenzus (+ CSV delay).
 #   4. Negativni testovi PADAJU kako treba — dakle testovi nisu tautologija.
 #   5. U --protect načinu korisnik ima vremenski prozor prije operatora.
+#   6. U --challenge načinu lažni izlaz se može oduzeti javnim dokazom.
 #
 # Pokretanje:
 #   BITCOIN_BIN=/put/do/bitcoin-27.1/bin SECP_PREFIX=/put/do/secp-inst ./run_regtest.sh
@@ -262,6 +263,60 @@ PO=$($CLI sendrawtransaction "$(cat "$WORK/p_op2.hex")" 2>/dev/null)
 mine1
 CONFO=$($CLI gettransaction "$PO" | python3 -c 'import sys,json;print(json.load(sys.stdin)["confirmations"])')
 [ "$CONFO" -ge 1 ] && ok "operatorska potrošnja potvrđena (samo nakon prozora)" || bad "operatorska potrošnja nije potvrđena"
+
+# ---------------------------------------------------------------- test 10: challenge/response
+hdr "10. CHALLENGE/RESPONSE — osporavanje lažnog izlaza"
+echo "  (bez ovoga korisnik podigne cijeli UTXO i nitko ga ne može kazniti)"
+$BEC genkeys --count 1 --out "$WORK/challenger.txt" >/dev/null
+CHKEY=$(cat "$WORK/challenger.txt")
+$BEC commit --keys "$WORK/keys64.txt" --operators "$WORK/operators.txt" \
+     --delay 144 --leaves 8 --protect --challenge --challenge-window 96 \
+     --challenger-key "$CHKEY" --hrp bcrt \
+     --out "$WORK/cm_chal.txt" > "$WORK/cm_chal.log" 2>&1
+grep -E "Challenge/response|Exit listova|Dubina tapscript" "$WORK/cm_chal.log" | sed 's/^/  /'
+CADDR=$(grep '^address=' "$WORK/cm_chal.txt" | cut -d= -f2-)
+CHDEST=$($CLI getaddressinfo "$($CLI getnewaddress)" | python3 -c 'import sys,json;print(json.load(sys.stdin)["scriptPubKey"])')
+
+# --- A) tvrdnja PRIJE prozora mora pasti ---
+read -r CTX1 CV1 CA1 < <(fund "$CADDR" 0.2 "$WORK/cm_chal.txt")
+$BEC spend-scriptpath --commitment "$WORK/cm_chal.txt" --txid "$CTX1" --vout "$CV1" \
+     --amount "$CA1" --dest-script "$CHDEST" --fee 2000 --leaf 0 --sequence 96 \
+     --out "$WORK/c_claim_early.hex" > "$WORK/c_claim_early.log" 2>&1
+expect_reject "$(cat "$WORK/c_claim_early.hex")" "tvrdnja PRIJE prozora (96 blokova)"
+
+# --- B) challenge s KRIVIM dokazom mora pasti na OP_EQUALVERIFY ---
+read -r CTX2 CV2 CA2 < <(fund "$CADDR" 0.2 "$WORK/cm_chal.txt")
+$BEC spend-challenge --commitment "$WORK/cm_chal.txt" --txid "$CTX2" --vout "$CV2" \
+     --amount "$CA2" --dest-script "$CHDEST" --fee 2000 --leaf 0 \
+     --challenger-key "$CHKEY" --sequence 1 --bad-evidence \
+     --out "$WORK/c_bad_ev.hex" > "$WORK/c_bad_ev.log" 2>&1
+expect_reject "$(cat "$WORK/c_bad_ev.hex")" "osporavanje s POGREŠNIM dokazom"
+
+# --- C) challenge s ISPRAVNIM dokazom: izlaz se oduzima ---
+read -r CTX3 CV3 CA3 < <(fund "$CADDR" 0.2 "$WORK/cm_chal.txt")
+$BEC spend-challenge --commitment "$WORK/cm_chal.txt" --txid "$CTX3" --vout "$CV3" \
+     --amount "$CA3" --dest-script "$CHDEST" --fee 2000 --leaf 0 \
+     --challenger-key "$CHKEY" --sequence 1 \
+     --out "$WORK/c_chal.hex" > "$WORK/c_chal.log" 2>&1
+grep -E "Claim digest|Dokaz odgovara" "$WORK/c_chal.log" | sed 's/^/  /'
+expect_accept "$(cat "$WORK/c_chal.hex")" "osporavanje s ISPRAVNIM dokazom"
+CTXID=$($CLI sendrawtransaction "$(cat "$WORK/c_chal.hex")" 2>/dev/null)
+mine1
+CCONF=$($CLI gettransaction "$CTXID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["confirmations"])')
+[ "$CCONF" -ge 1 ] && ok "osporavatelj preuzeo izlaz (potvrđeno u bloku)" || bad "osporavanje nije potvrđeno"
+
+# --- D) tvrdnja NAKON prozora: korisnik preuzima ---
+read -r CTX4 CV4 CA4 < <(fund "$CADDR" 0.2 "$WORK/cm_chal.txt")
+$CLI generatetoaddress 96 "$MINE" >/dev/null
+echo "  nakon 96 blokova prozora (visina $($CLI getblockcount)):"
+$BEC spend-scriptpath --commitment "$WORK/cm_chal.txt" --txid "$CTX4" --vout "$CV4" \
+     --amount "$CA4" --dest-script "$CHDEST" --fee 2000 --leaf 0 --sequence 96 \
+     --out "$WORK/c_claim.hex" > "$WORK/c_claim.log" 2>&1
+expect_accept "$(cat "$WORK/c_claim.hex")" "tvrdnja NAKON prozora (bez osporavanja)"
+UTXID=$($CLI sendrawtransaction "$(cat "$WORK/c_claim.hex")" 2>/dev/null)
+mine1
+UCONF=$($CLI gettransaction "$UTXID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["confirmations"])')
+[ "$UCONF" -ge 1 ] && ok "korisnik preuzeo izlaz nakon prozora (potvrđeno)" || bad "tvrdnja nije potvrđena"
 
 # ---------------------------------------------------------------- sažetak
 hdr "SAŽETAK"
