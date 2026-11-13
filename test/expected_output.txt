@@ -8,18 +8,18 @@
   ✅ PASS  5000 korisničkih + 3 operatorska ključa
 
 ═══ 1. BIP-341 adresa vs Bitcoin Core (descriptor oracle)
-  Bitcoin Core : bcrt1prm93fzwc4z9tm2uecfenruph80evwzet4cu4fg5mcvdrs9k0rxzsgk9q8w
-  naš program  : bcrt1prm93fzwc4z9tm2uecfenruph80evwzet4cu4fg5mcvdrs9k0rxzsgk9q8w
+  Bitcoin Core : bcrt1p7r4chykly62k59dyf6gelg95sncy0e45usznq0cq726uqp49nd9sl6av2f
+  naš program  : bcrt1p7r4chykly62k59dyf6gelg95sncy0e45usznq0cq726uqp49nd9sl6av2f
   ✅ PASS  taproot adresa se poklapa s Bitcoin Core
 
 ═══ 2. Key-path spend — MuSig2 (BIP-327) preko BIP-341 sighasha
   Exit listova u tapscript stablu     : 64
   Dubina tapscript stabla             : 6
-  State root                          : 1547b06ac311a13dea4936a14e429c1ec2444ac757bcf5fc3579f457bdc016f5
-  Internal key (MuSig2 agregat)       : 6ea87f9236a4540c5a12571d944b585bab91f4a3eddf300136f56b01dfe95e14
-  Taproot output key                  : eded372ee4f449603c260e81517f518cbb910a8dfeb1915d39038f73ccd55616
-  bech32m adresa (bcrt)              : bcrt1pahknwthy73ykq0pxp6q4zl633jaezz5dl6cezhfeqw8h8nx42ctq4uqzt7
-  funding: f1e84f7b82a5154ff8d29d4e4151424f81cb4523a000f0f0f859cc0d857caa05 vout=0 (100000000 sats)
+  State root                          : b271acb17eb97d6bbcc337b4135ed2f69580027f84a4ad1413622c88ebe869ac
+  Internal key                        : 90341f1fc0866eed4bee556a82aca8f0440ab31f6f66b96af4f2a60fc015a399
+  Taproot output key                  : c75d31394b17845d9b68c47d3b5280ed12d55530c2d216f6110ad95ad32c1cdb
+  bech32m adresa (bcrt)              : bcrt1pcawnzw2tz7z9mxmgc37nk55qa5fd24fsctfpdas3ptv445evrndslpjddq
+  funding: 4d832644041b01356b55950493be27bc6c1f9d6621c9d7b772bf58dc46109363 vout=0 (100000000 sats)
   Potpisnika (MuSig2)          : 3
   Witness veličina             : 64 B (1 element)
   Verifikacija vs output key   : OK
@@ -28,7 +28,7 @@
   vsize: 99 vB   (witness = 64 B neovisno o broju korisnika)
 
 ═══ 3. Script-path — unilateralni exit korisnika (+ CSV delay)
-  funding: 9e76f88c253d2602eef867ed5ba6d65e8565c6b55d7cba428aafe305592f0486 vout=1 (50000000 sats)
+  funding: 4560110b66626aef04e4d6b3a4d212afd4932bfcfa2f39ada42da5e63e202418 vout=0 (50000000 sats)
   Korisnik (leaf index)        : 2
   nSequence                    : 10  (CSV traži >= 10)
   Dubina dokaza                : 6 (225 B ukupno)
@@ -59,12 +59,32 @@
   Dubina state Merkle stabla          : 13
   Exit listova u tapscript stablu     : 4096
   Dubina tapscript stabla             : 12
-  Taproot output key                  : e252f1eaad21c8337d38832a3a01dcbf0874d31aa366fc4171412db0ca3e7792
-  bech32m adresa (bcrt)              : bcrt1puff0r64dy8yrxlfcsv4r5qwuhuy8f5c65dn0cst3gykmpj37w7fqck2tss
-  vrijeme commita: 82 ms
+  Taproot output key                  : 634ae9f761c51c4cae3a599523e2b57cf89cf655dd7924a7ff80c5a0755bea73
+  bech32m adresa (bcrt)              : bcrt1pvd9wnampc5wyet36tx2j8c440nufeaj4m4ujffllsrz6qa2mafesrnqkng
+  vrijeme commita: 126 ms
   ✅ PASS  5000 korisnika obrađeno
   ✅ PASS  validna bech32m adresa za 5000 korisnika
 
+═══ 9. ZAŠTITA — NUMS internal key + operatorski CSV iza korisničkog
+  (bez ovoga operatori mogu potrošiti output odmah i pretrčati korisnički exit)
+  CSV delay korisnika (blokovi)       : 144
+  CSV delay operatora (blokovi)       : 288
+  Key-path potrošnja                  : NEMOGUĆA (NUMS internal key)
+  Internal key                        : 50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0
+  Taproot output key                  : 413f45bf379496deddb0be409ea3f0d23c0328f9de25e13bfd99a5ad701f9e0c
+  ✅ PASS  internal key je BIP-341 NUMS (key-path nemoguć)
+  funding: 7ae58138e6e1560479b8ef34abd9a5c23d7883c7c96810e4f0b1226436a604f1 vout=1 (40000000 sats)
+  ✅ PASS  key-path (MuSig2 operatora) u --protect načinu — node odbija: mandatory-script-verify-flag-failed (Invalid Schnorr signature)
+  ✅ PASS  korisnikov exit PRIJE 144 bloka — node odbija: non-BIP68-final
+  ✅ PASS  operatorska potrošnja PRIJE 288 blokova — node odbija: non-BIP68-final
+  nakon 144 bloka (visina 325):
+  ✅ PASS  korisnikov exit NAKON 144 bloka — node prihvaća
+  ✅ PASS  operator još uvijek blokiran (korisnički prozor traje) — node odbija: non-BIP68-final
+  ✅ PASS  korisnikov unilateralni exit potvrđen u bloku
+  nakon 288 blokova (visina 615):
+  ✅ PASS  operatorska potrošnja NAKON 288 blokova — node prihvaća
+  ✅ PASS  operatorska potrošnja potvrđena (samo nakon prozora)
+
 ═══ SAŽETAK
-  PASS: 13   FAIL: 0
+  PASS: 22   FAIL: 0
   🎉 SVI TESTOVI PROŠLI — implementacija je potvrđena na Bitcoin Core konsenzusu.
